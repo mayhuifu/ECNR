@@ -65,13 +65,13 @@ All forks live under `vendor/<repo-name>/`. Vendored as plain clones (not submod
 | `github.com/xiph/rnnoise` | **Production baseline** | BSD-3 | Lightweight NS post-filter |
 | `github.com/xiph/speexdsp` | Secondary baseline | BSD-3 (revised) | Alternative AEC for low-power tier; resampler |
 | `github.com/Rikorose/DeepFilterNet` | Research / future | MIT + Apache-2.0 (dual) | 48 kHz full-band NS option |
-| `github.com/breizhn/DTLN-aec` | Research / future | MIT (verify) | Neural AEC reference (Python + TF, pretrained models) |
-| `github.com/fjiang9/NKF-AEC` | Research / future | Verify license | 5.3K-param Kalman-NN hybrid; key A55 candidate |
-| `github.com/athena-team/athena-signal` | Research / RES ref | Apache-2.0 (verify) | Multi-mic, DTD, ERLE, RES research |
+| `github.com/breizhn/DTLN-aec` | Research / future | MIT | Neural AEC reference (Python + TF, pretrained models) |
+| `github.com/fjiang9/NKF-AEC` | Research / future | BSD-3-Clause | 5.3K-param Kalman-NN hybrid; key A55 candidate |
+| `github.com/athena-team/athena-signal` | Research / RES ref | Apache-2.0 | Multi-mic, DTD, ERLE, RES research |
 
 **Status:** All seven cloned upstream-direct (no user fork) on 2026-05-09 to unblock Phase 0. Forks can be wired in later by replacing `vendor/<repo>` with a clone of the user's fork; nothing in our integration code depends on the remote URL.
 
-**License verification** is required before any code derived from a "verify" entry ships in a binary. Vendoring (cloning into `vendor/`) does not by itself create a derivative.
+**License audit (2026-05-10):** all four "verify" entries cleared. NKF-AEC carries its BSD-3 declaration in source-file headers (Tencent / THL A29 Limited, 2022) rather than a top-level LICENSE file — verified by inspecting `vendor/nkf-aec/src/nkf.py`. DTLN-AEC, athena-signal, DeepFilterNet all confirmed via top-level license files. Every vendored dependency is now MIT, BSD-3, or Apache-2.0 — all commercial-friendly, no GPL contamination, no copyleft surprises. Vendoring (cloning into `vendor/`) does not by itself create a derivative; the audit was completed as a Phase-3 prerequisite per ADR-0007 O3.
 
 ## Repository layout
 
@@ -117,10 +117,13 @@ ECNR/
 - **2026-05-10** — `frames_dropped` field on `ChainStats` surfaces shape-mismatch rejections instead of silent no-ops. Bench/live binaries print the counter; non-zero indicates a HAL/harness bug.
 - **2026-05-10** — Test threshold for cumulative ERLE tightened to > 15 dB (real AEC3 measures ~64 dB at 16 kHz / ~62 dB at 48 kHz on the synthetic correlated-echo stimulus). RTF measured ~0.057 on macOS Apple Silicon.
 - **2026-05-10** — Phase 0.5 closed out (Task 10): real WebRTC AEC3 + RNNoise + multi-rate + multi-mic Frame + > 15 dB ERLE thresholds all landed; 18/18 tests green; only the user's interactive listening test for `ecnr_live` remains as a manual verification step.
+- **2026-05-10** — ADRs 0007/0008/0009/0010 accepted in parallel after Phase 0.5 ship. Resolves the four open ADRs from ADR-0001's action items: TFLite + XNNPACK as neural runtime, six-trigger DSP-offload criteria (Phase 6 still deferred), HAL-supplied `RenderType` hint for media-aware AEC, fixed delay-and-sum beamformer with explicit `MicGeometry` config for Phase 1.
+- **2026-05-10** — License audit cleared all four "verify" markers. NKF-AEC is BSD-3-Clause (Tencent / THL A29 Limited, 2022; declaration in source-file headers). DTLN-AEC is MIT, athena-signal is Apache-2.0, DeepFilterNet is MIT + Apache-2.0 dual. All vendored deps are commercial-friendly. Phase-3 prerequisite per ADR-0007 O3 cleared.
+- **2026-05-10** — ADR-0002 (cabin reverb tail) opened as a stub. Numbering complete (0001–0010 all on disk). Decision deferred to Phase 2 when cabin IR measurements arrive; AEC3 default config holds in production until then.
 
 ## Open questions
 
 - U300 audio HAL integration API — callback vs pull/push, threading model, where the render tap lives in the existing pipeline. Required before Phase 1.
 - Vehicle access for cabin acoustic characterization. Required before Phase 2.
 - Whether to ship under a single namespace (e.g. `ecnr::`) or align with U300 conventions. Defer to Phase 1.
-- Final license verification for DTLN-AEC and NKF-AEC. Required before Phase 3.
+- ~~Final license verification for DTLN-AEC and NKF-AEC. Required before Phase 3.~~ — Cleared 2026-05-10 (audit committed).

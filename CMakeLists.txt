@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 project(ecnr LANGUAGES C CXX)
 
 # -----------------------------------------------------------------------------
-# Phase 0 build:
-#   Scaffold + stub backends. Real WebRTC AEC3 + RNNoise wiring lands in Phase
-#   0.5 behind the same AecChain interface. Only system deps for now: a C++17
-#   compiler, libsndfile, and (auto-fetched) googletest.
+# Phase 0.5 build:
+#   Real WebRTC AEC3 + RNNoise wired behind AecChain (multi-rate 16/48 kHz,
+#   2-8 mic, post-Beamformer mono into AEC3). System deps: a C++17 compiler,
+#   libsndfile, pkg-config, meson + abseil + speexdsp (for the vendored WebRTC
+#   build). googletest is fetched at configure time; miniaudio is vendored.
 # -----------------------------------------------------------------------------
 
 set(CMAKE_CXX_STANDARD 17)
@@ -137,7 +138,7 @@ gtest_discover_tests(beamformer_test)
 # -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
-message(STATUS "ecnr: Phase 0 build (stub backends; Phase 0.5 swaps in AEC3 + RNNoise)")
+message(STATUS "ecnr: Phase 0.5 build (real WebRTC AEC3 + RNNoise wired; multi-rate 16/48 kHz; 2-8 mic)")
 message(STATUS "  C++ standard : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  sndfile      : ${SNDFILE_VERSION}")
