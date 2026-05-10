@@ -6,7 +6,7 @@ See [PROJECT.md](PROJECT.md) for the architecture, roadmap, and dependency list.
 
 ## Status
 
-Phase 0 (bootstrap) **done**: scaffold + stub AEC/NS backends + dev-host smoke test green. Phase 0.6 (host live E2E loopback via miniaudio) **done**. Phase 0.5 (real WebRTC AEC3 + RNNoise wiring) is next. Not yet cross-compiled for A55. Not yet vehicle-validated.
+Phase 0 (bootstrap) **done**: scaffold + dev-host smoke test green. Phase 0.6 (host live E2E loopback via miniaudio) **done**. Phase 0.5 in progress: real WebRTC AEC3 wired (Task 6); RNNoise NS swap is next (Task 7). NS backend remains a stub. Not yet cross-compiled for A55. Not yet vehicle-validated.
 
 Vendored open-source dependencies are not in git — fetch on demand:
 
@@ -133,16 +133,16 @@ This produces three 10-second 16 kHz mono WAVs:
   --out /tmp/ecnr_offline_out.wav
 ```
 
-**Expected (numbers will vary slightly):**
+**Expected (numbers vary by machine; ERLE typically 12–20 dB on this synthetic stimulus):**
 
 ```
-frames=1000  audio=10.000s  cpu=0.001s  rtf=0.0001  erle_db=N/A  dropped=0
+frames=1000  audio=10.000s  cpu=0.14s  rtf=0.014  erle_db=16.68  dropped=0
 ```
 
 **How to read it:**
 - `frames=1000` and `audio=10.000s` → the harness consumed all 10 s of the input pair correctly.
-- `rtf` ≪ 1.0 → the chain is faster than realtime (under stubs it's trivially fast; under Phase 0.5 expect roughly 0.05–0.20 on this M-class machine).
-- `erle_db` comes from `ChainStats::echo_return_loss_enhancement_db`, an `std::optional<double>` that mirrors `webrtc::AudioProcessingStats::echo_return_loss_enhancement` (per ADR-0006). Under the Phase 0 stub the optional is `nullopt` and the printout shows `N/A`; the real number arrives once the WebRTC APM backend is wired in Task 6. The unit test (Step B) checks **cumulative** energy attenuation directly, which is the right signal under stubs.
+- `rtf` ≪ 1.0 → the chain is faster than realtime; on an M-class laptop expect roughly 0.01–0.05 with AEC3 wired.
+- `erle_db` is `webrtc::AudioProcessingStats::echo_return_loss_enhancement` surfaced through `ChainStats::echo_return_loss_enhancement_db` (an `std::optional<double>`, per ADR-0006). With real AEC3 wired (Task 6) it populates after a brief warm-up; the bench prints `N/A` only if the optional is still unset (e.g., the stimulus was so short AEC3 didn't have time to converge). On the synthetic mic/ref pair above, expect a value in the 12–20 dB range.
 - `dropped=0` — non-zero means a HAL/harness bug fed the chain a frame with wrong rate/channels/samples; should always be zero in healthy runs.
 
 ```sh
@@ -163,11 +163,11 @@ ls -la /tmp/ecnr_offline_out.wav  # should be ~320 KB (10 s × 16 kHz × 2 bytes
   --out /tmp/ecnr_live_out.wav
 ```
 
-**Expected (numbers depend on your room):**
+**Expected (numbers depend on your room; ERLE values vary widely):**
 
 ```
 ecnr_live: playing reference/synth/ref.wav, capturing from default mic. ctrl-c to abort.
-frames=1000  audio=10.000s  rtf=...  erle_db=N/A  cap_dropped=0  ref_dropped=0  chain_dropped=0
+frames=1000  audio=10.000s  rtf=0.02  erle_db=2.40  cap_dropped=0  ref_dropped=0  chain_dropped=0
 ```
 
 **How to read it:**
@@ -175,7 +175,7 @@ frames=1000  audio=10.000s  rtf=...  erle_db=N/A  cap_dropped=0  ref_dropped=0  
 - `chain_dropped=0` — non-zero means a HAL/harness bug fed the chain a frame with wrong rate/channels/samples; should always be zero in healthy runs.
 - `frames=1000` (matching the 10 s stimulus / 10 ms frames) → live loop ran cleanly to completion.
 - `rtf` should be similar to the offline run (Step D). Big swings indicate scheduling or device-side jitter.
-- `erle_db` shows `N/A` under the Phase 0 stub (the optional `echo_return_loss_enhancement_db` is `nullopt`). Real values land in Task 6 with the WebRTC backend.
+- `erle_db` is the real `webrtc::AudioProcessingStats::echo_return_loss_enhancement` (surfaced as `ChainStats::echo_return_loss_enhancement_db`, an `std::optional<double>`). In a quiet room with no real speaker→mic loop (e.g. headphones in, low volume) the value is small — close to 0 dB — because AEC3 has very little echo to cancel; in a loud room with the speaker driving the mic, expect higher numbers. The bench prints `N/A` only if the optional is still unset (extremely short stimulus / no convergence).
 
 **Listening test:**
 

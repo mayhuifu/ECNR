@@ -125,6 +125,10 @@ target_link_libraries(aec_chain_test PRIVATE ecnr_pipeline GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(aec_chain_test)
 
+add_executable(beamformer_test src/tests/beamformer_test.cc)
+target_link_libraries(beamformer_test PRIVATE ecnr_pipeline GTest::gtest_main)
+gtest_discover_tests(beamformer_test)
+
 # -----------------------------------------------------------------------------
 # Summary
 # -----------------------------------------------------------------------------
