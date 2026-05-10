@@ -108,8 +108,23 @@ SCENES = [
     (55.0,  3.0, "dog bark #2",   "dog_bark",      -3.0),
 ]
 
-# Echo gain: matches gen_test_input.py default for consistency. The cabin IR's
-# L2 normalization keeps post-convolution energy comparable across IRs.
+# Speaker→mic acoustic path is modeled as TWO components added together:
+#
+#   1. A direct-coupling path — ref_voice mixed into the mic at a small fixed
+#      delay (~2 ms, the speaker-to-nearest-mic flight time at ~0.7 m), no IR
+#      convolution. This makes the caller voice clearly audible and recognizable
+#      in the mic stream — without it, the caller is only present as smeared
+#      reverberant energy via the cabin IR and the demo's "AEC removed the
+#      caller" moment becomes perceptually subtle.
+#
+#   2. A reverberant echo path — ref_voice convolved with the cabin IR (scaled
+#      by ECHO_GAIN). This is the cabin reflection tail.
+#
+# Both are linear transforms of ref_voice, so AEC3 sees them as a single
+# composite IR and adapts to cancel their sum — same as a real speaker→mic
+# path with both early direct arrivals and a reverberant tail.
+DIRECT_COUPLING_GAIN_DB = -10.0
+DIRECT_COUPLING_DELAY_MS = 2.0
 ECHO_GAIN = 0.4
 NEAR_GAIN_DB = 0.0  # near-end is RMS-normalized to -18 dBFS at source already
 
@@ -255,13 +270,23 @@ def main() -> int:
     near_full = loop_or_clip(near_src, N_TOTAL)
     near_gain = 10.0 ** (NEAR_GAIN_DB / 20.0)
 
-    # 2. Echo path: ref convolved with cabin IR, scaled
+    # 2a. Direct-coupling path: ref voice into mic at a small fixed delay,
+    # no IR convolution. Dominates the early echo signal and is what makes
+    # the caller voice perceptibly recognizable in the before file.
+    direct_delay_n = int(DIRECT_COUPLING_DELAY_MS * 1e-3 * SR)
+    direct_gain_lin = 10.0 ** (DIRECT_COUPLING_GAIN_DB / 20.0)
+    direct_full = np.zeros(N_TOTAL, dtype=np.float64)
+    if direct_delay_n < N_TOTAL:
+        copy_n = N_TOTAL - direct_delay_n
+        direct_full[direct_delay_n:] = direct_gain_lin * ref_full[:copy_n]
+
+    # 2b. Echo path: ref convolved with cabin IR, scaled (the reverberant tail).
     cabin_ir_path, _ = resolved["cabin_ir"]
     assert cabin_ir_path is not None
     cabin_ir = load_via_ffmpeg(cabin_ir_path)
     echo_full = np.convolve(ref_full, cabin_ir)[:N_TOTAL] * ECHO_GAIN
 
-    mic = near_gain * near_full + echo_full
+    mic = near_gain * near_full + direct_full + echo_full
 
     # 3. Per-scene noise overlays
     print("# applying scenes:")
