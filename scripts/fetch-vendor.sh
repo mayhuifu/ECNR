@@ -12,6 +12,10 @@
 # below. They run after every checkout and must themselves be idempotent
 # (re-running with the artifact already present is a no-op). Currently only
 # rnnoise needs one — to download model weights not committed upstream.
+#
+# Hyphens in vendor names are mapped to underscores when looking up the
+# hook, so a vendor named `foo-bar` would have a hook function
+# `post_fetch_foo_bar` (bash identifiers cannot contain hyphens).
 
 set -euo pipefail
 
@@ -37,25 +41,65 @@ post_fetch_rnnoise() {
     return 0
   fi
   echo "       fetching rnnoise model weights"
+
   # Upstream script uses wget; on macOS we may not have it, so fall back to
   # curl while still validating against the pinned sha256 in `model_version`.
-  ( cd "$dest" \
-    && hash=$(cat model_version) \
-    && model="rnnoise_data-$hash.tar.gz" \
-    && if [[ ! -f "$model" ]]; then
-         if command -v wget >/dev/null 2>&1; then
-           wget -q "https://media.xiph.org/rnnoise/models/$model"
-         else
-           curl -fsSL -o "$model" "https://media.xiph.org/rnnoise/models/$model"
-         fi
-       fi \
-    && if command -v sha256sum >/dev/null 2>&1; then
-         got=$(sha256sum "$model" | awk '{print $1}')
-       else
-         got=$(shasum -a 256 "$model" | awk '{print $1}')
-       fi \
-    && [[ "$got" == "$hash" ]] || { echo "rnnoise model checksum mismatch" >&2; exit 1; } \
-    && tar xomf "$model" )
+  # Each step has its own diagnostic: a previous version chained everything
+  # with `&& ... ||` and any earlier failure (cd, missing model_version,
+  # download 404, sha256 tool missing) would print "checksum mismatch" —
+  # misdirecting debugging.
+  cd "$dest" || { echo "could not enter $dest" >&2; return 1; }
+
+  if [[ ! -f model_version ]]; then
+    echo "model_version missing in $dest" >&2
+    return 1
+  fi
+  local hash
+  hash=$(cat model_version)
+  if [[ -z "$hash" ]]; then
+    echo "model_version is empty in $dest" >&2
+    return 1
+  fi
+
+  local model="rnnoise_data-$hash.tar.gz"
+  if [[ ! -f "$model" ]]; then
+    local url="https://media.xiph.org/rnnoise/models/$model"
+    # URL mirrors vendor/rnnoise/download_model.sh; sync if xiph.org reorganizes.
+    if command -v wget >/dev/null 2>&1; then
+      if ! wget "$url"; then
+        echo "could not download $model from $url; check network or download manually" >&2
+        return 1
+      fi
+    elif command -v curl >/dev/null 2>&1; then
+      if ! curl -fsSL -o "$model" "$url"; then
+        echo "could not download $model from $url; check network or download manually" >&2
+        return 1
+      fi
+    else
+      echo "neither wget nor curl available; cannot fetch $url" >&2
+      return 1
+    fi
+  fi
+
+  local got
+  if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "$model" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    got=$(shasum -a 256 "$model" | awk '{print $1}')
+  else
+    echo "no sha256 tool available (need sha256sum or shasum)" >&2
+    return 1
+  fi
+
+  if [[ "$got" != "$hash" ]]; then
+    echo "rnnoise model checksum mismatch (got=$got expected=$hash) — re-download $model" >&2
+    return 1
+  fi
+
+  if ! tar xomf "$model"; then
+    echo "tar extract failed for $model" >&2
+    return 1
+  fi
 }
 
 mode="${1:-all}"
@@ -100,8 +144,11 @@ while IFS=$'\t' read -r name url commit tier required; do
 
   # Run a per-vendor post-fetch hook if one is defined. Hooks are idempotent
   # so we can call them on every pass (including "already at pinned commit").
-  if declare -f "post_fetch_$name" >/dev/null 2>&1; then
-    "post_fetch_$name" "$dest"
+  # Hyphens in vendor names are mapped to underscores so a vendor like
+  # `foo-bar` resolves to the (valid bash identifier) function `post_fetch_foo_bar`.
+  hook="post_fetch_${name//-/_}"
+  if declare -f "$hook" >/dev/null 2>&1; then
+    "$hook" "$dest"
   fi
 done < "$MANIFEST"
 
