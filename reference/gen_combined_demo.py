@@ -133,7 +133,20 @@ SCENES = [
 DIRECT_COUPLING_GAIN_DB = -10.0
 DIRECT_COUPLING_DELAY_MS = 2.0
 ECHO_GAIN = 0.4
-NEAR_GAIN_DB = 0.0  # near-end is RMS-normalized to -18 dBFS at source already
+NEAR_GAIN_DB = 0.0
+# Voice sources (near_voice + ref_voice) get loudness-normalized on load.
+# Two cases differ a lot:
+#   - Synthetic generators target -18 dBFS RMS, peak ~-3 dBFS (peak/RMS ~15 dB).
+#   - Real recordings via `ecnr_live --record-voice` have natural speech
+#     dynamics — peak/RMS often 20-30 dB, with silences dragging RMS down
+#     even further (recordings at -40 dBFS RMS with peaks at -15 dBFS are
+#     normal). Pure RMS normalization in this case would over-amplify the
+#     peaks and hard-clip them, which AEC3 cannot cancel (clipping is a
+#     non-linearity outside the linear filter's model).
+# So: RMS-normalize up to the target, but cap the gain so peaks stay below
+# VOICE_PEAK_CEILING_DBFS. Whichever constraint binds tighter wins.
+VOICE_TARGET_RMS_DBFS = -18.0
+VOICE_PEAK_CEILING_DBFS = -1.0
 
 
 def load_via_ffmpeg(path: pathlib.Path) -> np.ndarray:
@@ -181,6 +194,61 @@ def normalize_rms(x: np.ndarray, target_dbfs: float) -> np.ndarray:
         return x  # silence — leave alone
     target = 10.0 ** (target_dbfs / 20.0)
     return x * (target / rms)
+
+
+def active_speech_rms_dbfs(x: np.ndarray, active_thresh_dbfs: float = -50.0,
+                           win_ms: int = 200) -> float:
+    """RMS over above-threshold windows — perceived loudness of active speech.
+
+    Plain whole-file RMS is dragged down by silences (typical of natural
+    recordings: 50% active, RMS biased ~3 dB below active-speech RMS, more
+    if there's a lot of silence). Active RMS targets the windows that
+    actually contain speech, matching how broadcast loudness metrics
+    (EBU R128) gate out silence. Falls back to plain RMS if everything
+    is below threshold (e.g., the whole file is silent).
+    """
+    win_n = max(1, int(win_ms * SR // 1000))
+    if len(x) < win_n:
+        return 20.0 * math.log10(float(np.sqrt(np.mean(x * x)) + 1e-12))
+    n_windows = len(x) // win_n
+    truncated = x[:n_windows * win_n].reshape(n_windows, win_n)
+    win_energy = np.mean(truncated * truncated, axis=1)
+    win_db = 10.0 * np.log10(win_energy + 1e-24)
+    active_mask = win_db > active_thresh_dbfs
+    if not np.any(active_mask):
+        return 20.0 * math.log10(float(np.sqrt(np.mean(x * x)) + 1e-12))
+    active_energy = float(np.mean(win_energy[active_mask]))
+    return 10.0 * math.log10(active_energy + 1e-24)
+
+
+def normalize_voice(x: np.ndarray, target_rms_dbfs: float,
+                    peak_ceiling_dbfs: float) -> tuple[np.ndarray, float, str]:
+    """RMS-normalize x to target_rms_dbfs using ACTIVE-speech RMS (silence-gated),
+    but cap gain so peak ≤ peak_ceiling.
+
+    Returns (normalized_x, applied_gain_db, binding_constraint) where
+    binding_constraint is 'rms' or 'peak'. Peak-binding means the source has
+    natural dynamics (recording with strong peaks); rms-binding means the
+    peak/RMS ratio is moderate (synthetic or already-compressed source).
+
+    Using active-speech RMS as the loudness anchor matters for recordings:
+    a 60-second recording with 30 seconds of silence has whole-file RMS
+    ~3 dB below its active-speech RMS, more if the speech itself is sparse.
+    Normalizing on whole-file RMS would over-amplify, then peak-cap, leaving
+    the speech still 10+ dB below target. Active RMS sidesteps that.
+    """
+    active_rms_db = active_speech_rms_dbfs(x)
+    peak = float(np.max(np.abs(x)) + 1e-12)
+    if active_rms_db < -120.0 or peak < 1e-9:
+        return x, 0.0, "rms"  # essentially silent
+
+    rms_gain_db = target_rms_dbfs - active_rms_db
+    peak_gain_db = peak_ceiling_dbfs - 20.0 * math.log10(peak)
+
+    gain_db = min(rms_gain_db, peak_gain_db)
+    constraint = "peak" if peak_gain_db < rms_gain_db else "rms"
+    gain_lin = 10.0 ** (gain_db / 20.0)
+    return x * gain_lin, gain_db, constraint
 
 
 def fade_in_out(samples: np.ndarray, fade_n: int) -> np.ndarray:
@@ -262,10 +330,40 @@ def main() -> int:
             print(f"#   {start_s:5.1f}–{start_s + dur_s:5.1f}s  {name:<16}  gain={gain_db:+5.1f} dB  [{tag}]")
         return 0
 
+    def _stats_db(x: np.ndarray) -> tuple[float, float, float]:
+        rms = 20.0 * math.log10(float(np.sqrt(np.mean(x * x)) + 1e-12))
+        peak = 20.0 * math.log10(float(np.max(np.abs(x)) + 1e-12))
+        active = active_speech_rms_dbfs(x)
+        return rms, peak, active
+
+    def _load_and_normalize_voice(label: str, src_path: pathlib.Path) -> np.ndarray:
+        raw = load_via_ffmpeg(src_path)
+        rms_in, pk_in, active_in = _stats_db(raw)
+        normalized, gain_db, binding = normalize_voice(
+            raw, VOICE_TARGET_RMS_DBFS, VOICE_PEAK_CEILING_DBFS)
+        rms_out, pk_out, active_out = _stats_db(normalized)
+        print(f"# {label:<10} in: active_rms={active_in:+6.1f} pk={pk_in:+6.1f} dBFS  "
+              f"→ {gain_db:+6.2f} dB ({binding}-bound)  "
+              f"out: active_rms={active_out:+6.1f} pk={pk_out:+6.1f} dBFS")
+        # Warn when the recording itself is undermastered — peak well below
+        # typical-speech levels means even with peak-bound gain we can't lift
+        # the active RMS to target. The user should re-record with higher mic
+        # input gain.
+        TYPICAL_PEAK_DBFS = -6.0
+        if pk_in < TYPICAL_PEAK_DBFS - 3.0 and src_path.name != "voice_synth.wav" and src_path.name != "ref_voice.wav":
+            print(f"#   warning: {src_path.name} has peak {pk_in:+.1f} dBFS, much "
+                  f"below typical speech ({TYPICAL_PEAK_DBFS:+.0f} dBFS). The "
+                  f"composer is peak-bound at {VOICE_PEAK_CEILING_DBFS:+.0f} dBFS "
+                  f"so active RMS stops at {active_out:+.1f} (target was "
+                  f"{VOICE_TARGET_RMS_DBFS:+.0f}). Re-record with system mic gain "
+                  f"higher (macOS: System Settings → Sound → Input) — aim for "
+                  f"peaks of -3 to -6 dBFS during loud syllables.")
+        return normalized
+
     # ------------------------- Build the ref stream -------------------------
     ref_path, _ = resolved["ref_voice"]
     assert ref_path is not None
-    ref_src = load_via_ffmpeg(ref_path)
+    ref_src = _load_and_normalize_voice("ref_voice", ref_path)
     ref_full = loop_or_clip(ref_src, N_TOTAL)
     write_wav_mono_16k(out_dir / "demo_60s_ref.wav", ref_full)
 
@@ -273,7 +371,7 @@ def main() -> int:
     # 1. Near-end voice (looped voice_synth) — what AEC must preserve
     near_path, _ = resolved["near_voice"]
     assert near_path is not None
-    near_src = load_via_ffmpeg(near_path)
+    near_src = _load_and_normalize_voice("near_voice", near_path)
     near_full = loop_or_clip(near_src, N_TOTAL)
     near_gain = 10.0 ** (NEAR_GAIN_DB / 20.0)
 
