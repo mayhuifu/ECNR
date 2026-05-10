@@ -4,7 +4,7 @@
 This is the "no-human-in-the-loop" companion to `ecnr_live`. Given:
 
     voice (clean near-end, e.g. a recording or `voice_synth.wav`)
-  + echo  (a far-end stimulus convolved with a short synthetic room IR)
+  + echo  (a far-end stimulus convolved with a synthetic cabin IR)
   + noise (optional background noise — road, hvac, bark, ...)
 
 it produces a single 16 kHz mono int16 WAV that `ecnr_bench` can process
@@ -18,6 +18,14 @@ if it exists (i.e. the user has recorded their own voice via
 `ecnr_live --record-voice`), otherwise falls back to the synthetic
 `reference/synth/voice_synth.wav`. So a fresh checkout works immediately and
 upgrades to the user's own voice automatically once they record.
+
+IR resolution (in priority order):
+  1. --ir <path>                                  — explicit override (e.g. measured cabin IR)
+  2. reference/synth/cabin_ir.wav (if it exists)  — synthetic cabin IR from gen_synth.py
+  3. on-the-fly synthesis via gen_synth.gen_cabin_ir(--echo-rt60-ms)
+
+Phase 2 swaps step 2/3 for measured per-vehicle IRs by overwriting cabin_ir.wav
+or pointing --ir at one — no other change to this script needed.
 """
 
 from __future__ import annotations
@@ -70,20 +78,6 @@ def _write_wav_mono_16k(path: pathlib.Path, samples: np.ndarray) -> None:
         w.writeframes(pcm.tobytes())
 
 
-def _make_room_ir(ir_len_ms: int, rng: np.random.Generator) -> np.ndarray:
-    """Synthetic exponential-decay room IR — same shape as gen_synth.py uses.
-
-    The seed is fixed so the echo path is deterministic across runs.
-    """
-    ir_len = int(ir_len_ms * 1e-3 * SR)
-    if ir_len < 1:
-        ir_len = 1
-    ir = rng.standard_normal(ir_len) * np.exp(-np.arange(ir_len) / (0.005 * SR))
-    n = float(np.linalg.norm(ir) + 1e-9)
-    ir /= n
-    return ir
-
-
 def _resolve_voice_default() -> pathlib.Path | None:
     """Pick the default voice WAV: recorded if present, else synth, else None."""
     base = pathlib.Path("reference/synth")
@@ -94,6 +88,29 @@ def _resolve_voice_default() -> pathlib.Path | None:
     if synth.exists():
         return synth
     return None
+
+
+def _resolve_ir(ir_arg: str | None, rt60_ms: int) -> np.ndarray:
+    """Pick the IR to use: explicit --ir > reference/synth/cabin_ir.wav > synthesize.
+
+    Returns the IR samples as float64 in [-1, 1]. Raises ValueError if --ir was
+    given but the file is invalid; falls back silently to synthesis if the
+    default cabin_ir.wav is just missing.
+    """
+    if ir_arg is not None:
+        ir_path = pathlib.Path(ir_arg)
+        if not ir_path.exists():
+            raise ValueError(f"IR file not found: {ir_path}")
+        return _read_wav_mono_16k(ir_path)
+
+    default_ir = pathlib.Path("reference/synth/cabin_ir.wav")
+    if default_ir.exists():
+        return _read_wav_mono_16k(default_ir)
+
+    # Last-resort fallback: synthesize on-the-fly using gen_synth.gen_cabin_ir.
+    # Uses a fixed seed so re-runs are deterministic.
+    import gen_synth  # same directory as this script
+    return gen_synth.gen_cabin_ir(rt60_ms, np.random.default_rng(0xECA7))
 
 
 def main() -> int:
@@ -127,14 +144,28 @@ def main() -> int:
     p.add_argument(
         "--echo-gain",
         type=float,
-        default=0.5,
-        help="linear gain on the echoed stimulus, simulating speaker→mic acoustic level (default: 0.5)",
+        default=0.4,
+        help=(
+            "linear gain on the echoed stimulus, simulating speaker→mic acoustic level "
+            "(default: 0.4 — leaves ~20%% headroom over the cabin IR's broader energy "
+            "distribution; the prior 0.5 default occasionally clipped the mix, which "
+            "AEC3 cannot cancel because clipping is a nonlinearity outside its model)"
+        ),
     )
     p.add_argument(
-        "--echo-ir-len-ms",
+        "--ir",
+        default=None,
+        help=(
+            "path to an IR WAV (16 kHz mono) to convolve the stimulus with. "
+            "Default: reference/synth/cabin_ir.wav if present, else synthesize "
+            "via gen_synth.gen_cabin_ir(--echo-rt60-ms)."
+        ),
+    )
+    p.add_argument(
+        "--echo-rt60-ms",
         type=int,
-        default=30,
-        help="synthetic IR length in ms (default: 30, matches gen_synth.py)",
+        default=200,
+        help="RT60 (ms) for the on-the-fly cabin IR fallback (default: 200, passenger-car-typical)",
     )
     p.add_argument(
         "--out",
@@ -202,9 +233,16 @@ def main() -> int:
         print("error: output length is zero (empty inputs?)", file=sys.stderr)
         return 2
 
-    # --- Echo path: convolve stimulus with a short room IR, scale by echo_gain. ---
-    rng = np.random.default_rng(0xECA5)
-    ir = _make_room_ir(args.echo_ir_len_ms, rng)
+    # --- Echo path: convolve stimulus with the cabin IR, scale by echo_gain. ---
+    try:
+        ir = _resolve_ir(args.ir, args.echo_rt60_ms)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    ir_label = args.ir if args.ir else (
+        "cabin_ir.wav" if pathlib.Path("reference/synth/cabin_ir.wav").exists()
+        else f"synth(rt60={args.echo_rt60_ms}ms)"
+    )
     # Use only the first output_len samples of stimulus before convolution; this
     # keeps the convolution cost proportional to the output duration regardless
     # of input length.
@@ -249,7 +287,7 @@ def main() -> int:
         noise_summary = "noise(none)"
     print(
         f"wrote {args.out}: voice={voice_path} + echo(stimulus={stimulus_path}, "
-        f"gain={args.echo_gain:.2f}, ir={args.echo_ir_len_ms}ms) + {noise_summary}  "
+        f"gain={args.echo_gain:.2f}, ir={ir_label}) + {noise_summary}  "
         f"({duration_s:.1f}s @ {SR // 1000} kHz)"
     )
     return 0

@@ -32,8 +32,24 @@ ref_music.wav  = simple I-V-vi-IV chord progression in C major (~2 s/chord)
                  AEC's full-band behaviour and is the reference case for
                  ADR-0009 (media-aware AEC).
 
-All outputs are 16 kHz mono int16, length matched to --duration. The pair is
-time-aligned at sample 0; AEC's delay estimator handles the rest.
+And a synthetic cabin impulse response used by gen_test_input.py to convolve
+the speaker stimulus into a "what the mic would hear" signal:
+
+cabin_ir.wav   = direct path + sparse early reflections (3-30 ms) + decaying
+                 noise tail with HF absorption (cutoff ~3 kHz). RT60 default
+                 150 ms — mid-range for a passenger-car cabin per the
+                 architecture docs (cellular handsets are ~50 ms; cabins
+                 100-300 ms) and the largest tail AEC3's default filter
+                 (~52 ms) still meaningfully cancels. Use --cabin-rt60-ms to
+                 sweep; 250+ surfaces ADR-0002's tail-length concern (uncovered
+                 echo past AEC3's filter), 60 ms is handset-like. This is a
+                 stand-in for a measured Phase-2 cabin IR; swap in real
+                 measurements later by overwriting the file or pointing
+                 gen_test_input.py at one with --ir.
+
+All outputs (except cabin_ir.wav, which is sized by RT60) are 16 kHz mono int16,
+length matched to --duration. The pair is time-aligned at sample 0; AEC's delay
+estimator handles the rest.
 """
 
 from __future__ import annotations
@@ -485,6 +501,78 @@ def gen_music_render(n: int, rng: np.random.Generator) -> np.ndarray:
     return np.clip(out, -1.0, 1.0)
 
 
+def gen_cabin_ir(rt60_ms: int, rng: np.random.Generator) -> np.ndarray:
+    """Synthetic car-cabin impulse response.
+
+    Three components stacked at canonical relative levels:
+      1. Direct path: amplitude 1.0 at t=0 (the speaker driving the mic directly).
+      2. Early reflections: 6 random taps in [3, 30] ms with random sign and
+         amplitude in [0.1, 0.4] — windshield, dashboard, headliner, side
+         windows, etc. Each is a single-sample impulse (no per-reflection
+         spectral shaping; we let HF absorption fall on the tail instead).
+      3. Late tail: starts at 30 ms, gaussian noise * exp(-t/tau) where tau
+         is chosen so the envelope falls 60 dB at t = rt60_ms. The tail is
+         then run through a single-pole IIR lowpass at 3 kHz to mimic the
+         HF absorption of cabin trim/upholstery, scaled to amplitude 0.3 so
+         the direct path remains the dominant peak.
+
+    Total length is 1.2 * rt60_ms; beyond that the envelope is < -65 dB and
+    contributes nothing audible. The IR is L2-normalized (||ir||_2 = 1.0)
+    matching the convention of the prior toy IR in gen_test_input.py — that
+    keeps the post-convolution signal energy comparable across IRs of
+    different lengths, so existing --echo-gain defaults stay sensible.
+    Peak normalization would inflate convolved energy with longer RT60s and
+    push the mix into clipping (which AEC3 cannot cancel — clipping is a
+    nonlinearity outside the linear stage's model, masquerading as "AEC
+    doesn't work").
+
+    Cabin RT60 is typically 100-300 ms (vs ~50 ms for cellular handsets;
+    see PROJECT.md "Automotive specifics — known unknowns" and ADR-0002).
+    Default 200 ms is a representative midpoint; Phase 2 measurements will
+    replace this synthetic IR with real per-vehicle data.
+    """
+    rt60_s = rt60_ms * 1e-3
+    total_s = 1.2 * rt60_s
+    n_total = max(int(total_s * SR), 1)
+
+    ir = np.zeros(n_total, dtype=np.float64)
+    ir[0] = 1.0
+
+    n_early = 6
+    for _ in range(n_early):
+        t_ms = float(rng.uniform(3.0, 30.0))
+        idx = int(t_ms * 1e-3 * SR)
+        if 0 < idx < n_total:
+            sign = 1.0 if rng.random() > 0.5 else -1.0
+            amp = float(rng.uniform(0.1, 0.4)) * sign
+            ir[idx] += amp
+
+    tail_start = int(0.030 * SR)
+    if tail_start < n_total:
+        tau_s = rt60_s / 6.9078  # exp(-t/tau) = 1e-3 (-60 dB) at t = 6.9078 * tau
+        tail_len = n_total - tail_start
+        t_tail = np.arange(tail_len) / SR
+        envelope = np.exp(-t_tail / tau_s)
+        noise = rng.standard_normal(tail_len)
+        tail = noise * envelope
+
+        # Single-pole IIR lowpass on the tail. cutoff fc = 3 kHz; pole alpha
+        # such that the -3 dB point sits at fc (alpha = exp(-2*pi*fc/SR)).
+        fc = 3000.0
+        alpha = math.exp(-2.0 * math.pi * fc / SR)
+        filtered = np.empty_like(tail)
+        state = 0.0
+        for i, v in enumerate(tail):
+            state = alpha * state + (1.0 - alpha) * v
+            filtered[i] = state
+
+        ir[tail_start:] += 0.3 * filtered
+
+    norm = float(np.linalg.norm(ir) + 1e-12)
+    ir /= norm
+    return ir
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--duration", type=float, default=10.0)
@@ -504,11 +592,32 @@ def main() -> int:
         action="store_true",
         help="only generate ref_voice.wav and ref_music.wav (skip everything else)",
     )
+    p.add_argument(
+        "--cabin-ir-only",
+        action="store_true",
+        help="only generate cabin_ir.wav (skip everything else)",
+    )
+    p.add_argument(
+        "--cabin-rt60-ms",
+        type=int,
+        default=150,
+        help=(
+            "RT60 (ms) for the synthetic cabin IR (default: 150). Real cabins "
+            "span 100-300 ms; 150 sits at the lower end where AEC3's default "
+            "filter length (~52 ms) still extracts useful linear cancellation. "
+            "Crank to 250+ to surface ADR-0002's tail-length concern."
+        ),
+    )
     args = p.parse_args()
 
-    only_flags = sum(int(x) for x in (args.noise_only, args.voice_only, args.render_only))
+    only_flags = sum(int(x) for x in (
+        args.noise_only, args.voice_only, args.render_only, args.cabin_ir_only,
+    ))
     if only_flags > 1:
-        print("error: --noise-only / --voice-only / --render-only are mutually exclusive")
+        print(
+            "error: --noise-only / --voice-only / --render-only / --cabin-ir-only "
+            "are mutually exclusive"
+        )
         return 2
 
     out = pathlib.Path(args.out_dir)
@@ -535,6 +644,16 @@ def main() -> int:
         print(
             f"wrote {out}/{{ref_voice,ref_music}}.wav  "
             f"({args.duration:.1f}s @ {SR} Hz)"
+        )
+        return 0
+
+    if args.cabin_ir_only:
+        ir = gen_cabin_ir(args.cabin_rt60_ms, np.random.default_rng(0xECA7))
+        write_wav(out / "cabin_ir.wav", ir)
+        ir_ms = len(ir) * 1000.0 / SR
+        print(
+            f"wrote {out}/cabin_ir.wav  "
+            f"(rt60={args.cabin_rt60_ms} ms, len={ir_ms:.0f} ms @ {SR} Hz)"
         )
         return 0
 
@@ -565,6 +684,10 @@ def main() -> int:
         )
         write_wav(out / "ref_voice.wav", gen_voice_render(n, np.random.default_rng(0xECA5)))
         write_wav(out / "ref_music.wav", gen_music_render(n, np.random.default_rng(0xECA6)))
+        write_wav(
+            out / "cabin_ir.wav",
+            gen_cabin_ir(args.cabin_rt60_ms, np.random.default_rng(0xECA7)),
+        )
 
     # Noise stems use independent RNGs so --noise-only output is byte-identical
     # to the noise files in a full run.
@@ -580,7 +703,7 @@ def main() -> int:
     else:
         print(
             f"wrote {out}/{{ref,mic,near_clean,voice_synth,ref_voice,ref_music,"
-            f"noise_road,noise_bark,noise_hvac}}.wav  "
+            f"cabin_ir,noise_road,noise_bark,noise_hvac}}.wav  "
             f"({args.duration:.1f}s @ {SR} Hz)"
         )
     return 0
