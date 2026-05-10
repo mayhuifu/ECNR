@@ -26,6 +26,11 @@ include(FetchContent)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 
+# --- webrtc-audio-processing (vendored, built via Meson + ExternalProject) -----
+# Produces the imported target `webrtc::apm`. Downstream code (Phase 0.5
+# Task 6) will link against this; nothing in the pipeline uses it yet.
+include(cmake/BuildWebRTCAPM.cmake)
+
 # --- googletest -----------------------------------------------------------------
 FetchContent_Declare(
   googletest
