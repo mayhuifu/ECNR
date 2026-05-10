@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <cstdint>
 #include <cstdio>
 
 #include "core/frame.h"

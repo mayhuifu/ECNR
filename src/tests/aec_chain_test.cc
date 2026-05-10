@@ -118,9 +118,9 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   ASSERT_GT(cumulative_in_e, 0.0);
   ASSERT_GT(cumulative_out_e, 0.0);
   const double erle_db = 10.0 * std::log10(cumulative_in_e / cumulative_out_e);
-  // Conservative threshold to avoid CI flakiness; Task 8 tightens to > 15 dB
-  // once we're confident the wiring is solid.
-  EXPECT_GT(erle_db, 5.0) << "AEC3 failed to attenuate echo (erle_db=" << erle_db << ")";
+  // Real WebRTC AEC3 + RNNoise should achieve > 15 dB cumulative ERLE on
+  // this synthetic correlated-echo input.
+  EXPECT_GT(erle_db, 15.0) << "AEC3 failed to attenuate echo (erle_db=" << erle_db << ")";
 }
 
 TEST(AecChain, BeamformerCollapsesToMono) {
@@ -174,20 +174,37 @@ TEST(AecChain, ChainStatsPopulatedAfterAec3Convergence) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 2));
   std::mt19937 rng(0x1111);
-  Frame far, mic, out;
-  for (int i = 0; i < 200; ++i) {  // 2 s — gives APM time to populate stats
+  Frame zero_near{};
+  zero_near.n_samples = FrameSamplesFor(16000);
+  zero_near.n_channels = 1;
+  Frame far, mic_mono, mic, out;
+  constexpr double kEchoGain = 0.5;
+  // 5 s of correlated input — AEC3 needs ~3 s on white-noise echo before its
+  // adaptive filter converges enough to report a meaningful ERLE; we observe
+  // ~53 dB by frame 300 and 80+ dB by frame 400. 200 frames (2 s) is not
+  // enough for this synthetic stimulus.
+  for (int i = 0; i < 500; ++i) {
+    // Drive the chain with correlated render + capture (capture = echoed
+    // render) so AEC3 produces a meaningful ERLE value.
     FillNoise(far, rng, 16000, 1);
-    FillNoise(mic, rng, 16000, 2);
+    MixEcho(zero_near, far, kEchoGain, mic_mono);
+    mic.n_samples = FrameSamplesFor(16000);
+    mic.n_channels = 2;
+    for (int s = 0; s < mic.n_samples; ++s) {
+      mic.ch[0][s] = mic_mono.ch[0][s];
+      mic.ch[1][s] = mic_mono.ch[0][s];
+    }
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
   }
-  // At least one optional should be populated by APM after 2 seconds.
+  // After 5 s of correlated input, AEC3 must have populated ERLE. Other
+  // optionals (residual_echo_likelihood, delay_ms) populate on different
+  // APM cadences and are left loose.
   const auto& s = c.Stats();
-  EXPECT_TRUE(
-    s.echo_return_loss_enhancement_db.has_value() ||
-    s.residual_echo_likelihood.has_value() ||
-    s.delay_ms.has_value()
-  ) << "no APM stats populated after 2 seconds — check Aec3Adapter wiring";
+  EXPECT_TRUE(s.echo_return_loss_enhancement_db.has_value())
+      << "AEC3 should populate ERLE optional after 5 s of correlated input";
+  EXPECT_GT(s.echo_return_loss_enhancement_db.value_or(0.0), 5.0)
+      << "ERLE should be at least 5 dB on this stimulus";
 }
 
 TEST(AecChain, RejectsMisshapedFrame) {
@@ -285,6 +302,81 @@ TEST(AecChain, NsActiveAtBothRates) {
     EXPECT_LT(total_out_e, total_in_e * 0.9)
         << "rate=" << rate << " in_e=" << total_in_e << " out_e=" << total_out_e;
   }
+}
+
+TEST(AecChain, AttenuatesCorrelatedEchoAt48k) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(48000, 2));
+
+  std::mt19937 rng(0x4848);
+  Frame zero_near{};
+  Frame far, mic, out;
+  far.n_channels = 1;
+  far.n_samples = kFrameSamples48k;
+  mic.n_channels = 2;
+  mic.n_samples = kFrameSamples48k;
+  zero_near.n_channels = 2;
+  zero_near.n_samples = kFrameSamples48k;
+  constexpr double kEchoGain = 0.5;
+
+  // 3 seconds total; first 100 frames (1 s) are AEC3 warm-up.
+  double cumulative_in_e = 0.0;
+  double cumulative_out_e = 0.0;
+  for (int i = 0; i < 300; ++i) {
+    FillNoise(far, rng);
+    far.n_channels = 1;
+    far.n_samples = kFrameSamples48k;
+    MixEcho(zero_near, far, kEchoGain, mic);
+    mic.n_channels = 2;
+    mic.n_samples = kFrameSamples48k;
+
+    c.ProcessRender(far);
+    c.ProcessCapture(mic, out);
+
+    if (i >= 100) {
+      for (int j = 0; j < kFrameSamples48k; ++j) {
+        const double xin = static_cast<double>(mic.ch[0][j]) / 32768.0;
+        const double xout = static_cast<double>(out.ch[0][j]) / 32768.0;
+        cumulative_in_e += xin * xin;
+        cumulative_out_e += xout * xout;
+      }
+    }
+  }
+
+  ASSERT_GT(cumulative_in_e, 0.0);
+  ASSERT_GT(cumulative_out_e, 0.0);
+  const double erle_db = 10.0 * std::log10(cumulative_in_e / cumulative_out_e);
+  EXPECT_GT(erle_db, 15.0)
+      << "Real AEC3 + RNNoise should achieve > 15 dB cumulative ERLE at 48 kHz";
+}
+
+TEST(AecChain, ProcessesAt8Mics) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(16000, 8));
+
+  std::mt19937 rng(0x8888);
+  Frame far, mic, out;
+  far.n_channels = 1;
+  far.n_samples = kFrameSamples16k;
+  mic.n_channels = 8;
+  mic.n_samples = kFrameSamples16k;
+
+  // 100 frames: silent render, white noise on all 8 mic channels (different
+  // per channel). The chain should accept all frames (no drops) and produce
+  // mono output.
+  for (int i = 0; i < 100; ++i) {
+    for (int s = 0; s < far.n_samples; ++s) far.ch[0][s] = 0;
+    for (int ch = 0; ch < 8; ++ch) {
+      std::uniform_int_distribution<int> dist(-1000 - ch * 100, 1000 + ch * 100);
+      for (int s = 0; s < mic.n_samples; ++s) mic.ch[ch][s] = dist(rng);
+    }
+    c.ProcessRender(far);
+    c.ProcessCapture(mic, out);
+  }
+
+  EXPECT_EQ(c.Stats().frames_dropped, 0u);
+  EXPECT_EQ(out.n_channels, 1);
+  EXPECT_EQ(out.n_samples, kFrameSamples16k);
 }
 
 }  // namespace

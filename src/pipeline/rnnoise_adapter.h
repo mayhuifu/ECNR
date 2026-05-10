@@ -28,7 +28,9 @@ class RnNsAdapter {
   // Returns false on unsupported rate or if any sub-component fails.
   bool Init(int sample_rate_hz);
 
-  // Drop adapted state (RNNoise internal model context + resampler memory).
+  // Drop adapted state and re-allocate the RNNoise context. Not real-time
+  // safe — call only between streams (session boundary), never on the audio
+  // thread mid-frame.
   void Reset();
 
   // In-place processing of a mono frame. f.n_channels must be 1; f.n_samples
