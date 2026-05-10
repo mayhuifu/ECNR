@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -69,16 +70,28 @@ struct LiveState {
   ecnr::RingBuffer capture_ring{48000};
   ecnr::RingBuffer render_ring{48000};
 
-  // Stimulus playback cursor.
+  // Stimulus playback cursor. `stim_done` is atomic because the playback
+  // callback writes it on the audio thread and the main thread reads it
+  // OUTSIDE the mutex on each loop iteration. Without atomicity the read
+  // is undefined behavior under the C++ memory model and empirically does
+  // not become visible on macOS Apple Silicon — the program then runs
+  // forever and only exits on ctrl-C.
   std::vector<int16_t> stimulus;
   size_t stim_pos = 0;
-  bool stim_done = false;
+  std::atomic<bool> stim_done{false};
 
   std::atomic<uint64_t> capture_dropped{0};
   std::atomic<uint64_t> render_dropped{0};
 
   std::atomic<bool> stop{false};
 };
+
+// Set by the SIGINT handler so ctrl-C drains the loop and writes the WAV
+// instead of killing the process before output.
+std::atomic<bool>* g_stop_flag = nullptr;
+void HandleSigint(int /*sig*/) {
+  if (g_stop_flag) g_stop_flag->store(true, std::memory_order_release);
+}
 
 // Playback callback: pull next chunk of stimulus, write to output device,
 // AND copy the same samples into render_ring as the AEC reference.
@@ -88,13 +101,15 @@ void PlaybackCallback(ma_device* dev, void* output, const void* /*input*/, ma_ui
 
   std::lock_guard<std::mutex> lk(st->mu);
   ma_uint32 written = 0;
-  if (!st->stim_done) {
+  if (!st->stim_done.load(std::memory_order_acquire)) {
     const size_t remaining = st->stimulus.size() - st->stim_pos;
     const ma_uint32 take = static_cast<ma_uint32>(std::min<size_t>(remaining, frame_count));
     std::memcpy(out, st->stimulus.data() + st->stim_pos, take * sizeof(int16_t));
     st->stim_pos += take;
     written = take;
-    if (st->stim_pos >= st->stimulus.size()) st->stim_done = true;
+    if (st->stim_pos >= st->stimulus.size()) {
+      st->stim_done.store(true, std::memory_order_release);
+    }
   }
   if (written < frame_count) {
     std::memset(out + written, 0, (frame_count - written) * sizeof(int16_t));
@@ -143,6 +158,21 @@ int main(int argc, char** argv) {
 
   LiveState st;
   st.stimulus = std::move(stim.samples);
+
+  // Install a ctrl-C handler that flips st.stop. Without this, ctrl-C
+  // terminates the process before WriteWavMono runs and no output WAV is
+  // produced — exactly what bit the first user run.
+  g_stop_flag = &st.stop;
+  std::signal(SIGINT, HandleSigint);
+  std::signal(SIGTERM, HandleSigint);
+
+  // Defensive hard timeout: stimulus duration + 3 s drain. Even if stim_done
+  // detection or the stop flag misbehave, the program is guaranteed to exit
+  // on its own within this window. The user can still set --duration N
+  // explicitly to override.
+  const double stimulus_seconds =
+      static_cast<double>(st.stimulus.size()) / sample_rate_hz;
+  const double hard_timeout_s = stimulus_seconds + 3.0;
 
   // Configure two devices: one playback, one capture. miniaudio's "duplex"
   // mode is also possible but separate devices are easier to reason about,
@@ -240,22 +270,35 @@ int main(int argc, char** argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // Termination conditions: stimulus done AND we've drained capture, or
-    // explicit duration elapsed.
-    if (args.duration_s > 0.0) {
-      const auto elapsed = std::chrono::duration<double>(
-          std::chrono::steady_clock::now() - t_start).count();
-      if (elapsed >= args.duration_s) break;
-    } else if (st.stim_done) {
+    // Termination conditions, in priority order:
+    //   1. SIGINT/SIGTERM (st.stop set by handler) — drain & write WAV.
+    //   2. Explicit --duration N elapsed.
+    //   3. Stimulus exhausted + 200 ms drain for in-flight capture.
+    //   4. Hard timeout (stimulus_duration + 3 s) as a defensive backstop.
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - t_start).count();
+
+    if (st.stop.load(std::memory_order_acquire)) break;
+
+    if (args.duration_s > 0.0 && elapsed >= args.duration_s) break;
+
+    if (st.stim_done.load(std::memory_order_acquire)) {
       // Allow a 200 ms drain for in-flight capture before stopping.
       static auto stim_done_at = std::chrono::steady_clock::time_point::min();
       if (stim_done_at == std::chrono::steady_clock::time_point::min()) {
-        stim_done_at = std::chrono::steady_clock::now();
+        stim_done_at = now;
       }
-      if (std::chrono::steady_clock::now() - stim_done_at >
-          std::chrono::milliseconds(200)) {
+      if (now - stim_done_at > std::chrono::milliseconds(200)) {
         break;
       }
+    }
+
+    if (elapsed >= hard_timeout_s) {
+      std::fprintf(stderr,
+                   "ecnr_live: hard timeout (%.1fs) reached before stim_done; "
+                   "draining and writing partial output\n",
+                   hard_timeout_s);
+      break;
     }
   }
 
