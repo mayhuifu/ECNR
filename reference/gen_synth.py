@@ -13,12 +13,24 @@ noise_road.wav = pink-ish broadband rumble with a low-frequency wobble
 noise_bark.wav = 4-8 short band-limited bursts (dog-bark-shaped)
 noise_hvac.wav = 60 Hz hum + harmonics over a low-level pink noise floor
 
-And a synthetic-voice WAV used by `gen_test_input.py` as the deterministic
+A synthetic-voice WAV used by `gen_test_input.py` as the deterministic
 near-end source when a real recording isn't available:
 
 voice_synth.wav = continuous voiced/unvoiced synthetic speech (F0 ~110 Hz with
                   drift, formant peaks at ~700/1100/2400/3500 Hz, 5 Hz syllable
                   envelope, ~20% silences, normalized to -18 dBFS RMS)
+
+And two alternative far-end stimuli for the live demo (Step E in the README) —
+their content is recognizable, so when AEC3 cancels them you can hear the
+result instead of just "less white noise":
+
+ref_voice.wav  = TTS-prompt-style synthetic voice (F0 ~200 Hz with drift,
+                 different formant set from voice_synth, faster syllables,
+                 shorter silences). Read as "the caller on the other end."
+ref_music.wav  = simple I-V-vi-IV chord progression in C major (~2 s/chord)
+                 with sustained triads + an arpeggio melody on top. Stresses
+                 AEC's full-band behaviour and is the reference case for
+                 ADR-0009 (media-aware AEC).
 
 All outputs are 16 kHz mono int16, length matched to --duration. The pair is
 time-aligned at sample 0; AEC's delay estimator handles the rest.
@@ -288,6 +300,191 @@ def gen_voice_synth(n: int, rng: np.random.Generator) -> np.ndarray:
     return np.clip(speech, -1.0, 1.0)
 
 
+def gen_voice_render(n: int, rng: np.random.Generator) -> np.ndarray:
+    """TTS-prompt-style synthetic voice intended as a far-end render stimulus.
+
+    Distinguished from `gen_voice_synth` (the near-end speaker) by F0, formant
+    set, syllable cadence, and silence fraction so the two are easily separable
+    by ear when both are present. Roughly: a higher voice ("the caller"),
+    reading a continuous prompt at a brisk pace with few pauses.
+
+    F0 ~200 Hz with drift, formants at ~900/1400/2900/4000 Hz, 6 Hz syllable
+    rate, ~10% silences. Output normalized to -16 dBFS RMS — slightly hotter
+    than voice_synth so the speaker drives a meaningful echo level.
+    """
+    t = np.arange(n) / SR
+
+    drift = (np.sin(2.0 * math.pi * 0.17 * t + rng.uniform(0.0, 2.0 * math.pi))
+             + np.sin(2.0 * math.pi * 0.29 * t + rng.uniform(0.0, 2.0 * math.pi)))
+    drift /= float(np.max(np.abs(drift)) + 1e-12)
+    f0 = 200.0 + 25.0 * drift
+
+    phase = 2.0 * math.pi * np.cumsum(f0) / SR
+
+    formants = [(900.0, 110.0, 1.0),
+                (1400.0, 110.0, 0.85),
+                (2900.0, 170.0, 0.55),
+                (4000.0, 220.0, 0.35)]
+
+    def formant_gain(fh: np.ndarray) -> np.ndarray:
+        g = np.zeros_like(fh)
+        for f_c, bw, amp in formants:
+            g += amp / (1.0 + ((fh - f_c) / bw) ** 2)
+        return g
+
+    n_harmonics = 30
+    voiced = np.zeros(n, dtype=np.float64)
+    f0_mean = float(np.mean(f0))
+    for k in range(1, n_harmonics + 1):
+        fh = k * f0_mean
+        if fh >= 0.45 * SR:
+            break
+        g = float(formant_gain(np.array([fh]))[0])
+        voiced += (g / k) * np.sin(k * phase + rng.uniform(0.0, 2.0 * math.pi))
+    voiced /= float(np.max(np.abs(voiced)) + 1e-12)
+
+    white = rng.standard_normal(n)
+    carrier_hi = np.cos(2.0 * math.pi * 4500.0 * t)
+    unvoiced = white * carrier_hi
+    unvoiced /= float(np.max(np.abs(unvoiced)) + 1e-12)
+
+    vu_phase = rng.uniform(0.0, 2.0 * math.pi)
+    vu_sw = np.sin(2.0 * math.pi * 4.0 * t + vu_phase)
+    voiced_mask = (vu_sw > 0.0).astype(np.float64)
+    smooth_n = max(1, int(0.010 * SR))
+    kernel = np.ones(smooth_n) / smooth_n
+    voiced_mask = np.convolve(voiced_mask, kernel, mode="same")
+    unvoiced_mask = 1.0 - voiced_mask
+
+    speech = voiced * voiced_mask + 0.5 * unvoiced * unvoiced_mask
+
+    syl_phase = rng.uniform(0.0, 2.0 * math.pi)
+    syl_env = 0.5 + 0.5 * (0.5 + 0.5 * np.sin(2.0 * math.pi * 6.0 * t + syl_phase))
+    speech *= syl_env
+
+    silence_mask = np.ones(n, dtype=np.float64)
+    target_silent = int(0.10 * n)
+    placed_silent = 0
+    fade_n = int(0.005 * SR)
+    cursor = int(rng.uniform(0.0, 0.3 * SR))
+    safety = 0
+    while placed_silent < target_silent and safety < 100:
+        safety += 1
+        win_n = int(rng.uniform(0.060, 0.180) * SR)
+        if cursor + win_n >= n:
+            break
+        env = np.ones(win_n)
+        if win_n > 2 * fade_n:
+            ramp_in = 0.5 * (1.0 + np.cos(np.linspace(0.0, math.pi, fade_n)))
+            ramp_out = 0.5 * (1.0 + np.cos(np.linspace(math.pi, 0.0, fade_n)))
+            env[:fade_n] = ramp_in
+            env[win_n - fade_n:] = ramp_out
+        silence_mask[cursor:cursor + win_n] *= env
+        if win_n > 2 * fade_n:
+            silence_mask[cursor + fade_n:cursor + win_n - fade_n] = 0.0
+        placed_silent += win_n
+        gap = int(0.080 * SR) + int(rng.uniform(0.0, 0.350 * SR))
+        cursor += win_n + gap
+
+    speech *= silence_mask
+
+    rms = float(np.sqrt(np.mean(speech * speech)) + 1e-12)
+    if rms > 1e-9:
+        speech = _normalize_rms(speech, target_dbfs=-16.0)
+    return np.clip(speech, -1.0, 1.0)
+
+
+def gen_music_render(n: int, rng: np.random.Generator) -> np.ndarray:
+    """Simple I-V-vi-IV chord progression in C major with sustained triads
+    and an arpeggio melody on top. ~2 s/chord, looped across the duration.
+
+    Each note is a fundamental + two harmonics with amplitudes 1.0/0.5/0.25,
+    shaped by a per-chord ADSR. The arpeggio adds an 8th-note melody that
+    plays the chord tones in a (root, third, fifth, third) pattern. RMS
+    normalized to -16 dBFS.
+    """
+    # I-V-vi-IV in C major. Note frequencies in Hz (A4 = 440).
+    progression = [
+        # C major: C4 E4 G4
+        ((261.63, 329.63, 392.00),),
+        # G major: G3 B3 D4
+        ((196.00, 246.94, 293.66),),
+        # A minor: A3 C4 E4
+        ((220.00, 261.63, 329.63),),
+        # F major: F3 A3 C4
+        ((174.61, 220.00, 261.63),),
+    ]
+    chord_dur_s = 2.0
+    chord_n = int(chord_dur_s * SR)
+
+    def adsr(length: int, attack_s: float, release_s: float) -> np.ndarray:
+        env = np.ones(length, dtype=np.float64)
+        a = max(1, int(attack_s * SR))
+        r = max(1, int(release_s * SR))
+        if a + r >= length:
+            a = length // 4
+            r = length // 4
+        env[:a] = np.linspace(0.0, 1.0, a, endpoint=False)
+        env[length - r:] = np.linspace(1.0, 0.0, r, endpoint=True)
+        return env
+
+    def note(freq_hz: float, length: int, attack_s: float, release_s: float,
+             phase0: float) -> np.ndarray:
+        tt = np.arange(length) / SR
+        # Fundamental + 2nd + 3rd harmonics, amplitudes 1.0 / 0.5 / 0.25.
+        wave_f = (np.sin(2.0 * math.pi * freq_hz * tt + phase0)
+                  + 0.5 * np.sin(2.0 * math.pi * 2.0 * freq_hz * tt + phase0)
+                  + 0.25 * np.sin(2.0 * math.pi * 3.0 * freq_hz * tt + phase0))
+        return wave_f * adsr(length, attack_s, release_s)
+
+    out = np.zeros(n, dtype=np.float64)
+
+    # Loop the progression until the buffer is full.
+    chord_idx = 0
+    cursor = 0
+    while cursor < n:
+        triad = progression[chord_idx % len(progression)][0]
+        end = min(cursor + chord_n, n)
+        seg_len = end - cursor
+
+        # Sustained chord: each note across the whole segment.
+        chord_seg = np.zeros(seg_len, dtype=np.float64)
+        for f in triad:
+            phase0 = rng.uniform(0.0, 2.0 * math.pi)
+            chord_seg += note(f, seg_len, attack_s=0.025, release_s=0.080, phase0=phase0)
+        # Normalize before adding so each chord has roughly equal level.
+        chord_peak = float(np.max(np.abs(chord_seg)) + 1e-12)
+        chord_seg /= chord_peak
+
+        # Arpeggio melody: 8 eighth-notes per chord (one per ~250 ms at 2 s/chord).
+        # Pattern walks the triad as (root, third, fifth, third) twice.
+        beats_per_chord = 8
+        beat_n = seg_len // beats_per_chord if seg_len >= beats_per_chord else seg_len
+        arp_seg = np.zeros(seg_len, dtype=np.float64)
+        if beat_n > 0:
+            pattern = [0, 1, 2, 1, 0, 1, 2, 1]
+            for b in range(beats_per_chord):
+                start = b * beat_n
+                if start >= seg_len:
+                    break
+                length = min(beat_n, seg_len - start)
+                f = triad[pattern[b]] * 2.0  # one octave up
+                phase0 = rng.uniform(0.0, 2.0 * math.pi)
+                arp_seg[start:start + length] += note(
+                    f, length, attack_s=0.010, release_s=0.060, phase0=phase0)
+            arp_peak = float(np.max(np.abs(arp_seg)) + 1e-12)
+            arp_seg /= arp_peak
+
+        # Mix sustained chord (louder) + arpeggio (quieter).
+        out[cursor:end] = 0.7 * chord_seg + 0.4 * arp_seg
+
+        cursor = end
+        chord_idx += 1
+
+    out = _normalize_rms(out, target_dbfs=-16.0)
+    return np.clip(out, -1.0, 1.0)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--duration", type=float, default=10.0)
@@ -302,10 +499,16 @@ def main() -> int:
         action="store_true",
         help="only generate voice_synth.wav (skip everything else)",
     )
+    p.add_argument(
+        "--render-only",
+        action="store_true",
+        help="only generate ref_voice.wav and ref_music.wav (skip everything else)",
+    )
     args = p.parse_args()
 
-    if args.noise_only and args.voice_only:
-        print("error: --noise-only and --voice-only are mutually exclusive")
+    only_flags = sum(int(x) for x in (args.noise_only, args.voice_only, args.render_only))
+    if only_flags > 1:
+        print("error: --noise-only / --voice-only / --render-only are mutually exclusive")
         return 2
 
     out = pathlib.Path(args.out_dir)
@@ -314,8 +517,8 @@ def main() -> int:
     n = int(args.duration * SR)
     rng = np.random.default_rng(0xECA0)
 
-    # voice_synth uses its own seed (0xECA4) so --voice-only output is
-    # byte-identical to a full run.
+    # Each ancillary stem uses its own seed so --foo-only output is
+    # byte-identical to the corresponding stem from a full run.
     if args.voice_only:
         write_wav(
             out / "voice_synth.wav",
@@ -323,6 +526,15 @@ def main() -> int:
         )
         print(
             f"wrote {out}/voice_synth.wav  ({args.duration:.1f}s @ {SR} Hz)"
+        )
+        return 0
+
+    if args.render_only:
+        write_wav(out / "ref_voice.wav", gen_voice_render(n, np.random.default_rng(0xECA5)))
+        write_wav(out / "ref_music.wav", gen_music_render(n, np.random.default_rng(0xECA6)))
+        print(
+            f"wrote {out}/{{ref_voice,ref_music}}.wav  "
+            f"({args.duration:.1f}s @ {SR} Hz)"
         )
         return 0
 
@@ -351,6 +563,8 @@ def main() -> int:
             out / "voice_synth.wav",
             gen_voice_synth(n, np.random.default_rng(0xECA4)),
         )
+        write_wav(out / "ref_voice.wav", gen_voice_render(n, np.random.default_rng(0xECA5)))
+        write_wav(out / "ref_music.wav", gen_music_render(n, np.random.default_rng(0xECA6)))
 
     # Noise stems use independent RNGs so --noise-only output is byte-identical
     # to the noise files in a full run.
@@ -365,7 +579,8 @@ def main() -> int:
         )
     else:
         print(
-            f"wrote {out}/{{ref,mic,near_clean,voice_synth,noise_road,noise_bark,noise_hvac}}.wav  "
+            f"wrote {out}/{{ref,mic,near_clean,voice_synth,ref_voice,ref_music,"
+            f"noise_road,noise_bark,noise_hvac}}.wav  "
             f"({args.duration:.1f}s @ {SR} Hz)"
         )
     return 0
