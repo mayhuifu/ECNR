@@ -310,26 +310,25 @@ TEST(AecChain, AttenuatesCorrelatedEchoAt48k) {
 
   std::mt19937 rng(0x4848);
   Frame zero_near{};
-  Frame far, mic, out;
-  far.n_channels = 1;
-  far.n_samples = kFrameSamples48k;
-  mic.n_channels = 2;
-  mic.n_samples = kFrameSamples48k;
-  zero_near.n_channels = 2;
-  zero_near.n_samples = kFrameSamples48k;
+  zero_near.n_samples = FrameSamplesFor(48000);
+  zero_near.n_channels = 1;
+  Frame far, mic_mono, mic, out;
   constexpr double kEchoGain = 0.5;
 
   // 3 seconds total; first 100 frames (1 s) are AEC3 warm-up.
   double cumulative_in_e = 0.0;
   double cumulative_out_e = 0.0;
   for (int i = 0; i < 300; ++i) {
-    FillNoise(far, rng);
-    far.n_channels = 1;
-    far.n_samples = kFrameSamples48k;
-    MixEcho(zero_near, far, kEchoGain, mic);
+    // Render is mono @ 48 kHz (480 samples) — fresh noise every frame.
+    FillNoise(far, rng, 48000, 1);
+    // Build the mono echoed mic, then duplicate into a 2-channel mic frame.
+    MixEcho(zero_near, far, kEchoGain, mic_mono);
+    mic.n_samples = FrameSamplesFor(48000);
     mic.n_channels = 2;
-    mic.n_samples = kFrameSamples48k;
-
+    for (int s = 0; s < mic.n_samples; ++s) {
+      mic.ch[0][s] = mic_mono.ch[0][s];
+      mic.ch[1][s] = mic_mono.ch[0][s];
+    }
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
 

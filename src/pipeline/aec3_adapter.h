@@ -43,8 +43,9 @@ class Aec3Adapter {
   // Returns false on unsupported rate or if APM construction fails.
   bool Init(int sample_rate_hz);
 
-  // Drop adapted state; call on stream restart, sample-rate change, or
-  // confirmed routing change at the HAL.
+  // Drop AEC3 adapted state (re-runs APM Initialize). Not real-time safe —
+  // call only between streams (session boundary), never on the audio thread
+  // mid-frame.
   void Reset();
 
   // Forward to webrtc::AudioProcessing::set_stream_delay_ms (already
