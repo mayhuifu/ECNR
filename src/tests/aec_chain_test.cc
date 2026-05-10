@@ -76,15 +76,21 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   EXPECT_GT(erle_db, 5.0) << "Phase 0 stub AEC failed to attenuate echo";
 }
 
-TEST(AecChain, SetStreamDelayMsAcceptedInRange) {
+TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
   AecChain c;
   ASSERT_TRUE(c.Init(kSampleRateHz));
-  EXPECT_TRUE(c.SetStreamDelayMs(50));
-  EXPECT_TRUE(c.SetStreamDelayMs(0));
-  EXPECT_TRUE(c.SetStreamDelayMs(500));
-  EXPECT_FALSE(c.SetStreamDelayMs(-1));
-  EXPECT_FALSE(c.SetStreamDelayMs(501));
-  EXPECT_FALSE(c.SetStreamDelayMs(5000));
+  // Stub backend has no public getter; we only verify the call is total
+  // (no crash for any int) and that boundary + out-of-range values are
+  // accepted silently per the clamp contract in ADR-0006.
+  // TODO(task-6): once webrtc::AudioProcessing is wired, assert that
+  // out-of-range inputs land at the clamped bound by reading back through
+  // ChainStats::delay_ms after a few render/capture cycles.
+  c.SetStreamDelayMs(0);
+  c.SetStreamDelayMs(50);
+  c.SetStreamDelayMs(kMaxStreamDelayMs);
+  c.SetStreamDelayMs(-1);             // clamps to 0
+  c.SetStreamDelayMs(kMaxStreamDelayMs + 1);  // clamps down
+  c.SetStreamDelayMs(5000);           // clamps down
 }
 
 TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {

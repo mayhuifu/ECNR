@@ -8,6 +8,12 @@
 
 namespace ecnr {
 
+// Conservative upper bound for the render→capture delay seed we forward to
+// AEC3. Mirrors WebRTC AudioProcessingImpl::set_stream_delay_ms which clamps
+// to the same value (audio_processing_impl.cc, see TODO in upstream noting
+// the bound is somewhat arbitrary). Values above are clamped down.
+constexpr int kMaxStreamDelayMs = 500;
+
 // Aggregated runtime stats for the chain. Updated each ProcessCapture call.
 // Optional fields mirror webrtc::AudioProcessingStats field-for-field
 // (per ADR-0006); under the Phase-0 stub they all stay nullopt and are
@@ -31,9 +37,9 @@ struct ChainStats {
   // residual_echo_likelihood_recent_max.
   std::optional<double> residual_echo_likelihood_recent_max;
   // AEC3's current delay estimate in ms. Mirrors delay_ms.
-  std::optional<int>    delay_ms;
+  std::optional<int32_t> delay_ms;
   // Median observed delay. Mirrors delay_median_ms.
-  std::optional<int>    delay_median_ms;
+  std::optional<int32_t> delay_median_ms;
   // Fraction of time the adaptive filter is divergent. Mirrors
   // divergent_filter_fraction.
   std::optional<double> divergent_filter_fraction;
@@ -74,8 +80,9 @@ class AecChain {
   // pushed via ProcessRender and the corresponding mic frame about to be
   // pushed via ProcessCapture. WebRTC AEC3 (wired in Task 6) uses this to
   // seed its delay estimator; passing the wrong value makes AEC fail-quiet
-  // (no apparent echo cancellation). 0 ≤ ms ≤ 500. Returns false on out-of-range.
-  bool SetStreamDelayMs(int ms);
+  // (no apparent echo cancellation). Values outside [0, kMaxStreamDelayMs]
+  // are clamped (matches webrtc::AudioProcessing::set_stream_delay_ms).
+  void SetStreamDelayMs(int delay_ms);
 
   const ChainStats& Stats() const;
 

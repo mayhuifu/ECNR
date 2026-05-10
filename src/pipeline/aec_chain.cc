@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 #include "core/frame.h"
@@ -106,10 +105,8 @@ void AecChain::Reset() {
   impl_->stats = {};
 }
 
-bool AecChain::SetStreamDelayMs(int ms) {
-  if (ms < 0 || ms > 500) return false;
-  impl_->stream_delay_ms = ms;
-  return true;
+void AecChain::SetStreamDelayMs(int delay_ms) {
+  impl_->stream_delay_ms = std::clamp(delay_ms, 0, kMaxStreamDelayMs);
 }
 
 const ChainStats& AecChain::Stats() const { return impl_->stats; }
