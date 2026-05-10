@@ -49,6 +49,16 @@ struct ChainStats {
   // in healthy callers; non-zero is a bug in upstream HAL or harness code.
   uint64_t frames_dropped = 0;
 
+  // RNNoise's smoothed voice-activity probability for the most recent
+  // processed frame, in [0, 1]. nullopt until ProcessCapture has been
+  // called at least once. See RnNsAdapter::LastVadProb / SetVadBlendRange
+  // (Step B of the NS over-suppression mitigation tracked in PROJECT.md).
+  std::optional<float> ns_vad_prob;
+  // Per-frame blend α actually applied in the wet/dry mix (interpolated
+  // between vad_blend_low and vad_blend_high by ns_vad_prob). Useful for
+  // bench logging and confirming the blend is being modulated as expected.
+  std::optional<float> ns_current_blend;
+
   // Real-Time Factor: cpu_time / audio_time. < 1.0 = faster than realtime.
   double Rtf() const {
     return audio_time_s > 0.0 ? cpu_time_s / audio_time_s : 0.0;
@@ -100,6 +110,17 @@ class AecChain {
   // non-stationary noise scenes documented in PROJECT.md "Known
   // limitations". Real-time safe; can be called between frames.
   void SetNsDryBlend(float blend);
+
+  // VAD-gated NS blend (Step B of the over-suppression mitigation).
+  // Selects per-frame α between `low` (noise-dominant frames) and `high`
+  // (voice-dominant frames) using RNNoise's per-frame voice-activity
+  // probability as the interpolation parameter, with asymmetric smoothing
+  // (fast attack to voice mode, slow decay back to noise mode). Setting
+  // low = high reduces to the uniform Step-A blend. Suggested production
+  // pair: low = 0.0 (full RNNoise on pure-noise frames) + high = 0.30
+  // (cap at ~-10 dB suppression on voice-dominant frames to avoid
+  // chopping). Forwards to RnNsAdapter::SetVadBlendRange.
+  void SetNsVadBlendRange(float low, float high);
 
   const ChainStats& Stats() const;
 

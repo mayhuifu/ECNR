@@ -14,15 +14,22 @@ struct Args {
   std::string mic;
   std::string ref;
   std::string out = "out.wav";
-  // 0 = unchanged RNNoise (default); 0.25 caps suppression at ~-12 dB; 1 = NS
-  // bypass. See AecChain::SetNsDryBlend / RnNsAdapter::SetDryBlend.
+  // Step A: uniform blend. 0 = unchanged RNNoise (default); 0.25 caps
+  // suppression at ~-12 dB; 1 = NS bypass.
   float ns_dry_blend = 0.0f;
+  // Step B: VAD-gated blend range. When both > 0, supersedes ns_dry_blend.
+  // low = blend used for noise-dominant frames (typically 0);
+  // high = blend used for voice-dominant frames (typically 0.25-0.30).
+  bool ns_vad_blend_set = false;
+  float ns_vad_blend_low = 0.0f;
+  float ns_vad_blend_high = 0.0f;
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
-               "usage: %s --mic mic.wav --ref ref.wav [--out out.wav] "
-               "[--ns-dry-blend <0..1>]\n", prog);
+               "usage: %s --mic mic.wav --ref ref.wav [--out out.wav]\n"
+               "       [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n",
+               prog);
 }
 
 bool ParseArgs(int argc, char** argv, Args* a) {
@@ -35,6 +42,24 @@ bool ParseArgs(int argc, char** argv, Args* a) {
       if (flag == "--out") a->out = val;
     } else if (flag == "--ns-dry-blend" && i + 1 < argc) {
       a->ns_dry_blend = std::stof(argv[++i]);
+    } else if (flag == "--ns-vad-blend" && i + 1 < argc) {
+      const std::string val = argv[++i];
+      const auto comma = val.find(',');
+      if (comma == std::string::npos) {
+        std::fprintf(stderr,
+            "--ns-vad-blend expects \"low,high\" (e.g. 0.0,0.30); got: %s\n",
+            val.c_str());
+        return false;
+      }
+      try {
+        a->ns_vad_blend_low = std::stof(val.substr(0, comma));
+        a->ns_vad_blend_high = std::stof(val.substr(comma + 1));
+        a->ns_vad_blend_set = true;
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --ns-vad-blend value '%s': %s\n",
+                     val.c_str(), e.what());
+        return false;
+      }
     } else if (flag == "-h" || flag == "--help") {
       return false;
     } else {
@@ -89,7 +114,13 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
-  chain.SetNsDryBlend(args.ns_dry_blend);
+  // --ns-vad-blend (Step B) supersedes --ns-dry-blend (Step A) when both
+  // are passed; Step A is equivalent to VAD-blend with low == high.
+  if (args.ns_vad_blend_set) {
+    chain.SetNsVadBlendRange(args.ns_vad_blend_low, args.ns_vad_blend_high);
+  } else {
+    chain.SetNsDryBlend(args.ns_dry_blend);
+  }
 
   const size_t total_frames =
       std::min(mic_wav.samples.size(), ref_wav.samples.size()) /
@@ -137,7 +168,16 @@ int main(int argc, char** argv) {
   }
   std::printf("  dropped=%llu",
               static_cast<unsigned long long>(s.frames_dropped));
-  if (args.ns_dry_blend > 0.0f) {
+  if (args.ns_vad_blend_set) {
+    std::printf("  ns_vad_blend=%.2f..%.2f", args.ns_vad_blend_low,
+                args.ns_vad_blend_high);
+    if (s.ns_vad_prob.has_value()) {
+      std::printf("  last_vad=%.3f", *s.ns_vad_prob);
+    }
+    if (s.ns_current_blend.has_value()) {
+      std::printf("  last_blend=%.3f", *s.ns_current_blend);
+    }
+  } else if (args.ns_dry_blend > 0.0f) {
     std::printf("  ns_dry_blend=%.3f", args.ns_dry_blend);
   }
   std::printf("\n");

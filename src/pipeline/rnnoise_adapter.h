@@ -35,19 +35,37 @@ class RnNsAdapter {
   void Reset();
 
   // Cap NS suppression by mixing α·input back into the (1−α)·rnnoise_output.
-  // blend ∈ [0, 1]; 0 = current behavior (full RNNoise), 1 = NS bypass
-  // (output equals input). With blend = 0.25 the effective suppression floor
-  // is roughly -12 dB because the input always contributes ~25% of the
-  // output, preventing RNNoise's mask from driving voice-bearing bands
-  // arbitrarily close to silence (the "watery / chopped voice" artifact on
-  // non-stationary noise scenes — babble, stadium, music — that motivates
-  // PROJECT.md's "Known limitations" entry). Default 0.0 keeps the
-  // pre-mitigation behavior so all existing test thresholds still hold.
-  // Real-time safe; can be called between frames.
+  // Uniform blend (same α for every frame). blend ∈ [0, 1]; 0 = current
+  // behavior (full RNNoise), 1 = NS bypass (output equals input). With
+  // blend = 0.25 the effective suppression floor is roughly -12 dB because
+  // the input always contributes ~25% of the output. Internally this calls
+  // SetVadBlendRange(blend, blend) — uniform blend is a special case of
+  // VAD-gated blend with equal endpoints.
   void SetDryBlend(float blend);
 
-  // Currently-set blend value. Useful for round-trip tests and bench logging.
-  float DryBlend() const;
+  // VAD-gated blend (Step B mitigation). Selects per-frame α between
+  // `low` (noise-dominant frames) and `high` (voice-dominant frames),
+  // interpolated by RNNoise's own voice-activity probability output (the
+  // return value of rnnoise_process_frame). Asymmetric smoothing: fast
+  // attack to voice mode (protects speech onsets from missed VAD),
+  // slow decay back to noise mode (~140 ms half-life — keeps voice mode
+  // through brief inter-word silences). low = high reduces to a uniform
+  // blend; low = 0.0, high = 0.30 is the suggested production default:
+  // noise-only frames get full RNNoise, voice-dominant frames get ~-10 dB
+  // suppression cap so voice content isn't chopped. Real-time safe; can
+  // be called between frames.
+  void SetVadBlendRange(float low, float high);
+
+  // Currently-active blend for the most recent processed frame (after
+  // VAD smoothing and interpolation). Useful for bench-line logging and
+  // for AecChain to surface into ChainStats. Returns the configured
+  // low value before the first Process() call.
+  float CurrentBlend() const;
+
+  // Most recent RNNoise-reported voice activity probability (smoothed by
+  // the asymmetric hangover). [0, 1]. Useful diagnostic for the bench
+  // and live binaries.
+  float LastVadProb() const;
 
   // In-place processing of a mono frame. f.n_channels must be 1; f.n_samples
   // must match the configured rate. No-op (and stderr warning) on misshape.

@@ -490,6 +490,83 @@ TEST(AecChain, NsDryBlendDefaultIsZero) {
   EXPECT_EQ(c.Stats().frames_dropped, 0u);
 }
 
+// Step B mitigation. SetNsVadBlendRange(low, high) with low == high collapses
+// to Step A behaviour exactly (RnNsAdapter::SetDryBlend forwards to this).
+// SetNsVadBlendRange also surfaces VAD probability + actual applied blend
+// into ChainStats so callers can confirm modulation is happening.
+TEST(AecChain, NsVadBlendRangeSurfacesStats) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(16000, 2));
+  c.SetNsVadBlendRange(0.0f, 0.30f);
+
+  // Before any ProcessCapture, the optional VAD fields are nullopt.
+  EXPECT_FALSE(c.Stats().ns_vad_prob.has_value());
+  EXPECT_FALSE(c.Stats().ns_current_blend.has_value());
+
+  // Push one capture frame so the optionals populate.
+  std::mt19937 rng(0xb1ad);
+  Frame far, mic, out;
+  far.n_channels = 1;
+  far.n_samples = kFrameSamples16k;
+  mic.n_channels = 2;
+  mic.n_samples = kFrameSamples16k;
+  for (int s = 0; s < far.n_samples; ++s) far.ch[0][s] = 0;
+  for (int s = 0; s < mic.n_samples; ++s) {
+    mic.ch[0][s] = static_cast<int16_t>(rng() & 0xFFFF);
+    mic.ch[1][s] = mic.ch[0][s];
+  }
+  c.ProcessRender(far);
+  c.ProcessCapture(mic, out);
+
+  ASSERT_TRUE(c.Stats().ns_vad_prob.has_value());
+  ASSERT_TRUE(c.Stats().ns_current_blend.has_value());
+  // VAD probability is in [0, 1].
+  EXPECT_GE(*c.Stats().ns_vad_prob, 0.0f);
+  EXPECT_LE(*c.Stats().ns_vad_prob, 1.0f);
+  // Applied blend is bounded by the configured range. Endpoints are
+  // inclusive — at the first frame the smoothed VAD is at its initial 0
+  // and will start drifting toward the raw VAD output, so the very first
+  // blend is the low endpoint.
+  EXPECT_GE(*c.Stats().ns_current_blend, 0.0f);
+  EXPECT_LE(*c.Stats().ns_current_blend, 0.30f);
+}
+
+// SetNsVadBlendRange(α, α) — uniform endpoints — should produce a chain that
+// behaves bit-equivalently to SetNsDryBlend(α): same output, same applied
+// blend regardless of VAD output (because both endpoints are identical so
+// interpolation yields α everywhere).
+TEST(AecChain, NsVadBlendRangeUniformEqualsDryBlend) {
+  AecChain c_uniform_vad, c_dry;
+  ASSERT_TRUE(c_uniform_vad.Init(16000, 2));
+  ASSERT_TRUE(c_dry.Init(16000, 2));
+  c_uniform_vad.SetNsVadBlendRange(0.25f, 0.25f);
+  c_dry.SetNsDryBlend(0.25f);
+
+  std::mt19937 rng_a(0xbeef);
+  std::mt19937 rng_b(0xbeef);  // Same seed.
+
+  Frame silent_render, mic, out_a, out_b;
+  silent_render.n_channels = 1;
+  silent_render.n_samples = kFrameSamples16k;
+  for (int s = 0; s < silent_render.n_samples; ++s) silent_render.ch[0][s] = 0;
+
+  for (int i = 0; i < 100; ++i) {
+    FillNoise(mic, rng_a, 16000, 2);
+    c_uniform_vad.ProcessRender(silent_render);
+    c_uniform_vad.ProcessCapture(mic, out_a);
+
+    FillNoise(mic, rng_b, 16000, 2);  // Same content.
+    c_dry.ProcessRender(silent_render);
+    c_dry.ProcessCapture(mic, out_b);
+
+    for (int s = 0; s < out_a.n_samples; ++s) {
+      EXPECT_EQ(out_a.ch[0][s], out_b.ch[0][s])
+          << "uniform VAD blend should be bit-equal to dry blend, "
+          << "diverged at frame " << i << " sample " << s;
+    }
+  }
+}
+
 TEST(AecChain, ProcessesAt8Mics) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 8));

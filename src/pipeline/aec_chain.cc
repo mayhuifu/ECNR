@@ -108,6 +108,12 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
   impl_->stats.delay_ms                            = a.delay_ms;
   impl_->stats.delay_median_ms                     = a.delay_median_ms;
   impl_->stats.divergent_filter_fraction           = a.divergent_filter_fraction;
+  // NS diagnostics. Always populated after at least one ProcessCapture; the
+  // values are valid even when the chain is in pre-mitigation behaviour
+  // (vad_prob still reflects RNNoise's internal VAD, just unused for the
+  // blend computation when low == high == 0).
+  impl_->stats.ns_vad_prob       = impl_->ns.LastVadProb();
+  impl_->stats.ns_current_blend  = impl_->ns.CurrentBlend();
 }
 
 void AecChain::Reset() {
@@ -123,6 +129,10 @@ void AecChain::SetStreamDelayMs(int delay_ms) {
 
 void AecChain::SetNsDryBlend(float blend) {
   impl_->ns.SetDryBlend(blend);
+}
+
+void AecChain::SetNsVadBlendRange(float low, float high) {
+  impl_->ns.SetVadBlendRange(low, high);
 }
 
 const ChainStats& AecChain::Stats() const { return impl_->stats; }

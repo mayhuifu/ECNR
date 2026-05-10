@@ -44,9 +44,12 @@ struct Args {
   std::string inject_noise;   // optional: WAV mixed into capture stream before AEC
   double inject_gain_db = -12.0;  // gain applied to injected noise before mixing
   double duration_s = 0.0;    // 0 = play stimulus to completion
-  // 0 = unchanged RNNoise (default); 0.25 caps suppression at ~-12 dB; 1 = NS
-  // bypass. See AecChain::SetNsDryBlend.
+  // Step A: uniform NS blend. 0 = unchanged RNNoise (default).
   float ns_dry_blend = 0.0f;
+  // Step B: VAD-gated blend. When set, supersedes ns_dry_blend.
+  bool ns_vad_blend_set = false;
+  float ns_vad_blend_low = 0.0f;
+  float ns_vad_blend_high = 0.0f;
   // Record-only mode: no stimulus playback, no AEC; capture from default mic and
   // dump to the given WAV. Used to record a clean near-end voice signal for
   // gen_test_input.py (the deterministic A/B harness — see Step E.2 in README).
@@ -67,9 +70,13 @@ void PrintUsage(const char* prog) {
       "  --inject-noise FILE   WAV mixed into the capture stream before AEC sees it\n"
       "                        (must match stimulus rate, mono int16; loops if shorter)\n"
       "  --inject-gain-db DB   gain applied to injected noise (default: -12.0)\n"
-      "  --ns-dry-blend FLOAT  cap NS suppression by mixing input back into output;\n"
+      "  --ns-dry-blend FLOAT  cap NS suppression by mixing input back into output (Step A);\n"
       "                        0 = unchanged RNNoise (default), 0.25 = -12 dB floor,\n"
       "                        1 = NS bypass. Mitigates chopped-voice artifact on heavy noise.\n"
+      "  --ns-vad-blend LOW,HIGH  VAD-gated blend (Step B); supersedes --ns-dry-blend.\n"
+      "                        e.g. 0.0,0.30 means full NS on noise frames + -10 dB cap on\n"
+      "                        voice-dominant frames. Uses RNNoise's internal VAD with\n"
+      "                        asymmetric attack/decay smoothing.\n"
       "  --duration SECONDS    cap session length (default: stimulus duration; or 15 s in --record-voice mode)\n"
       "  --record-voice FILE   record-only mode: capture from the default mic for --duration seconds\n"
       "                        (default 15 s) and write a 16 kHz mono WAV. No stimulus playback,\n"
@@ -86,6 +93,25 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--inject-noise" && i + 1 < argc) a->inject_noise = argv[++i];
     else if (flag == "--inject-gain-db" && i + 1 < argc) a->inject_gain_db = std::stod(argv[++i]);
     else if (flag == "--ns-dry-blend" && i + 1 < argc) a->ns_dry_blend = std::stof(argv[++i]);
+    else if (flag == "--ns-vad-blend" && i + 1 < argc) {
+      const std::string val = argv[++i];
+      const auto comma = val.find(',');
+      if (comma == std::string::npos) {
+        std::fprintf(stderr,
+            "--ns-vad-blend expects \"low,high\" (e.g. 0.0,0.30); got: %s\n",
+            val.c_str());
+        return false;
+      }
+      try {
+        a->ns_vad_blend_low = std::stof(val.substr(0, comma));
+        a->ns_vad_blend_high = std::stof(val.substr(comma + 1));
+        a->ns_vad_blend_set = true;
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --ns-vad-blend value '%s': %s\n",
+                     val.c_str(), e.what());
+        return false;
+      }
+    }
     else if (flag == "--duration" && i + 1 < argc) a->duration_s = std::stod(argv[++i]);
     else if (flag == "--record-voice" && i + 1 < argc) a->record_voice = argv[++i];
     else if (flag == "-h" || flag == "--help") return false;
@@ -416,7 +442,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
-  chain.SetNsDryBlend(args.ns_dry_blend);
+  if (args.ns_vad_blend_set) {
+    chain.SetNsVadBlendRange(args.ns_vad_blend_low, args.ns_vad_blend_high);
+  } else {
+    chain.SetNsDryBlend(args.ns_dry_blend);
+  }
 
   if (ma_device_start(&cap_dev) != MA_SUCCESS) {
     std::fprintf(stderr, "ma_device_start(capture) failed\n");

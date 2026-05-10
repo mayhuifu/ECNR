@@ -22,7 +22,22 @@ struct RnNsAdapter::Impl {
   SpeexResamplerState* up = nullptr;   // 16k -> 48k (only at 16k tier)
   SpeexResamplerState* down = nullptr; // 48k -> 16k (only at 16k tier)
   int sample_rate_hz = 0;
-  float dry_blend = 0.0f;              // 0=current, 1=NS bypass (see SetDryBlend)
+  // VAD-gated blend (Step B). vad_blend_low <= α(p) <= vad_blend_high where
+  // p is RNNoise's smoothed voice-activity probability. Uniform blend
+  // (Step A) is the special case low == high. Both default 0 = pre-
+  // mitigation behaviour (full RNNoise on every frame).
+  float vad_blend_low = 0.0f;
+  float vad_blend_high = 0.0f;
+  float vad_smoothed = 0.0f;           // smoothed voice prob [0, 1]
+  float current_blend = 0.0f;          // last applied α (for diagnostics)
+  // Asymmetric one-pole filter on RNNoise's voice probability. Attack pulls
+  // hard toward p when p > smoothed (fast onset detection); decay pulls
+  // gently back when p < smoothed (slow drift back through pauses, keeping
+  // voice mode active through inter-word silences). Coefficients at 16 k
+  // (10 ms frames): attack ≈ 50 % per frame → 10 ms half-life; decay
+  // ≈ 5 % per frame → ~140 ms half-life. Reasonable for speech rhythms.
+  float vad_attack = 0.5f;
+  float vad_decay = 0.05f;
 
   ~Impl() {
     if (st) rnnoise_destroy(st);
@@ -65,18 +80,34 @@ void RnNsAdapter::Reset() {
   }
   if (impl_->up) speex_resampler_reset_mem(impl_->up);
   if (impl_->down) speex_resampler_reset_mem(impl_->down);
-  // Dry blend is configuration, not adaptive state — survives Reset.
+  // Blend endpoints + smoothing constants are configuration and survive
+  // Reset; the smoothed VAD probability is adaptive state and drops to 0
+  // so a new session starts in noise-mode (consistent with first-frame
+  // behaviour at construction time).
+  impl_->vad_smoothed = 0.0f;
+  impl_->current_blend = impl_->vad_blend_low;
 }
 
 void RnNsAdapter::SetDryBlend(float blend) {
-  // Clamp to [0, 1]. Values outside this range have no useful semantic and
-  // would just amplify or invert the signal.
-  if (blend < 0.0f) blend = 0.0f;
-  if (blend > 1.0f) blend = 1.0f;
-  impl_->dry_blend = blend;
+  // Uniform blend is just VAD-gated blend with both endpoints equal.
+  SetVadBlendRange(blend, blend);
 }
 
-float RnNsAdapter::DryBlend() const { return impl_->dry_blend; }
+void RnNsAdapter::SetVadBlendRange(float low, float high) {
+  auto clamp01 = [](float x) {
+    if (x < 0.0f) return 0.0f;
+    if (x > 1.0f) return 1.0f;
+    return x;
+  };
+  impl_->vad_blend_low = clamp01(low);
+  impl_->vad_blend_high = clamp01(high);
+  // Keep current_blend in sync for diagnostic getters called before any
+  // Process(); uses the low value as the "no-voice" baseline.
+  impl_->current_blend = impl_->vad_blend_low;
+}
+
+float RnNsAdapter::CurrentBlend() const { return impl_->current_blend; }
+float RnNsAdapter::LastVadProb() const { return impl_->vad_smoothed; }
 
 void RnNsAdapter::Process(Frame& f) {
   if (!impl_->st) return;
@@ -97,13 +128,18 @@ void RnNsAdapter::Process(Frame& f) {
 
   // Working buffer at 48 kHz.
   std::array<float, kRnnoiseFrameSamples> rnnoise_buf{};
+  // RNNoise's per-frame voice-activity probability (function return value).
+  // Used to modulate the wet/dry blend between vad_blend_low and
+  // vad_blend_high.
+  float vad_prob = 0.0f;
 
   if (impl_->sample_rate_hz == 48000) {
     // Direct: int16 -> float (int16-range, NOT normalized).
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       rnnoise_buf[i] = static_cast<float>(f.ch[0][i]);
     }
-    rnnoise_process_frame(impl_->st, rnnoise_buf.data(), rnnoise_buf.data());
+    vad_prob = rnnoise_process_frame(impl_->st, rnnoise_buf.data(),
+                                     rnnoise_buf.data());
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       const float v = rnnoise_buf[i];
       f.ch[0][i] = static_cast<int16_t>(
@@ -129,7 +165,8 @@ void RnNsAdapter::Process(Frame& f) {
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       rnnoise_buf[i] = static_cast<float>(up_buf[i]);
     }
-    rnnoise_process_frame(impl_->st, rnnoise_buf.data(), rnnoise_buf.data());
+    vad_prob = rnnoise_process_frame(impl_->st, rnnoise_buf.data(),
+                                     rnnoise_buf.data());
     std::array<int16_t, kRnnoiseFrameSamples> processed_48k{};
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       const float v = rnnoise_buf[i];
@@ -149,9 +186,28 @@ void RnNsAdapter::Process(Frame& f) {
     }
   }
 
+  // Smooth VAD probability with asymmetric attack/decay so the blend
+  // modulation doesn't pop at every short noisy frame.
+  if (vad_prob > impl_->vad_smoothed) {
+    impl_->vad_smoothed =
+        (1.0f - impl_->vad_attack) * impl_->vad_smoothed +
+        impl_->vad_attack * vad_prob;
+  } else {
+    impl_->vad_smoothed =
+        (1.0f - impl_->vad_decay) * impl_->vad_smoothed +
+        impl_->vad_decay * vad_prob;
+  }
+  // Compute the per-frame blend α by interpolating between the two
+  // configured endpoints. When low == high this collapses to a uniform
+  // (Step-A) blend and the VAD has no effect — bit-exact backward
+  // compatibility for callers that only set SetDryBlend.
+  const float alpha = impl_->vad_blend_low +
+                      (impl_->vad_blend_high - impl_->vad_blend_low) *
+                          impl_->vad_smoothed;
+  impl_->current_blend = alpha;
+
   // Wet/dry blend: out = α·input + (1−α)·rnnoise_output. Skipped at α=0 for
   // bit-exact backward compatibility with pre-mitigation behavior.
-  const float alpha = impl_->dry_blend;
   if (alpha > 0.0f) {
     const float wet = 1.0f - alpha;
     for (int i = 0; i < n; ++i) {
