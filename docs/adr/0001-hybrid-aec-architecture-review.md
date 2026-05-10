@@ -160,7 +160,7 @@ These are the load-bearing assumptions in the architecture that are *plausible b
 **Status:** **Probably needs a separate path.** Music has very different statistics from voice (long decay, full-band, high crest factor). Linear AEC is fine but the *neural post-filter* trained on voice residuals may treat music as "noise to suppress" or "echo to attenuate" inconsistently. Some automotive stacks use a **media-aware AEC** that knows when music is playing and adjusts.
 **Validation:** Test the chain with music playback as the render signal; measure if the post-filter introduces musical artifacts.
 **Mitigation if wrong:** Add a "render type" hint into the chain (voice vs music), with the post-filter selecting different behavior or being bypassed for media playback.
-**Recommended:** Promote to **ADR-0006 — Media-aware AEC** before Phase 3 (neural integration).
+**Recommended:** Promote to **ADR-0009 — Media-aware AEC** before Phase 3 (neural integration). *(Originally reserved as ADR-0006; renumbered when 0006 was assigned to the AecChain interface ADR on 2026-05-10.)*
 
 ### A6. The `AecChain` interface is API-compatible with WebRTC's `AudioProcessing`
 
@@ -186,9 +186,10 @@ The following ADRs should be opened (or merged into Phase 0.5/1 design):
 2. [ ] **ADR-0003** — Canonical sample rate (16 kHz vs 32 kHz vs 48 kHz)  *(blocking Phase 0.5)*
 3. [ ] **ADR-0004** — Mic geometry & beamforming  *(blocking Phase 0.5 if multi-mic confirmed)*
 4. [ ] **ADR-0005** — Render-tap policy & DRC/EQ compensation  *(highest-impact unknown)*
-5. [ ] **ADR-0006** — Media-aware AEC (music vs voice render)
+5. [x] **ADR-0006** — AecChain interface alignment with WebRTC APM (created 2026-05-10; supersedes the earlier reservation of this number for Media-aware AEC)
 6. [ ] **ADR-0007** — Neural runtime (TFLite vs ONNX vs raw weights; quantization plan)
 7. [ ] **ADR-0008** — DSP offload decision criteria (when does Phase 6 trigger?)
+8. [ ] **ADR-0009** — Media-aware AEC (music vs voice render) *(was previously slated as ADR-0006; renumbered when 0006 was used for the AecChain interface ADR)*
 
 Process actions:
 
