@@ -121,6 +121,10 @@ void AecChain::SetStreamDelayMs(int delay_ms) {
   impl_->stream_delay_ms = std::clamp(delay_ms, 0, kMaxStreamDelayMs);
 }
 
+void AecChain::SetNsDryBlend(float blend) {
+  impl_->ns.SetDryBlend(blend);
+}
+
 const ChainStats& AecChain::Stats() const { return impl_->stats; }
 
 }  // namespace ecnr

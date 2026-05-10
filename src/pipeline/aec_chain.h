@@ -93,6 +93,14 @@ class AecChain {
   // are clamped (matches webrtc::AudioProcessing::set_stream_delay_ms).
   void SetStreamDelayMs(int delay_ms);
 
+  // Cap NS suppression by mixing α·NS-input back into (1−α)·NS-output.
+  // Forwards to RnNsAdapter::SetDryBlend. blend ∈ [0, 1]; 0 = unchanged
+  // RNNoise (default), 1 = NS bypass. blend = 0.25 caps suppression at
+  // ~-12 dB, mitigating the chopped-voice / over-suppression artifact on
+  // non-stationary noise scenes documented in PROJECT.md "Known
+  // limitations". Real-time safe; can be called between frames.
+  void SetNsDryBlend(float blend);
+
   const ChainStats& Stats() const;
 
  private:

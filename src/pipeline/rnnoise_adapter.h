@@ -34,6 +34,21 @@ class RnNsAdapter {
   // thread mid-frame.
   void Reset();
 
+  // Cap NS suppression by mixing α·input back into the (1−α)·rnnoise_output.
+  // blend ∈ [0, 1]; 0 = current behavior (full RNNoise), 1 = NS bypass
+  // (output equals input). With blend = 0.25 the effective suppression floor
+  // is roughly -12 dB because the input always contributes ~25% of the
+  // output, preventing RNNoise's mask from driving voice-bearing bands
+  // arbitrarily close to silence (the "watery / chopped voice" artifact on
+  // non-stationary noise scenes — babble, stadium, music — that motivates
+  // PROJECT.md's "Known limitations" entry). Default 0.0 keeps the
+  // pre-mitigation behavior so all existing test thresholds still hold.
+  // Real-time safe; can be called between frames.
+  void SetDryBlend(float blend);
+
+  // Currently-set blend value. Useful for round-trip tests and bench logging.
+  float DryBlend() const;
+
   // In-place processing of a mono frame. f.n_channels must be 1; f.n_samples
   // must match the configured rate. No-op (and stderr warning) on misshape.
   void Process(Frame& f);

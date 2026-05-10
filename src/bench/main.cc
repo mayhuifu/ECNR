@@ -14,11 +14,15 @@ struct Args {
   std::string mic;
   std::string ref;
   std::string out = "out.wav";
+  // 0 = unchanged RNNoise (default); 0.25 caps suppression at ~-12 dB; 1 = NS
+  // bypass. See AecChain::SetNsDryBlend / RnNsAdapter::SetDryBlend.
+  float ns_dry_blend = 0.0f;
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
-               "usage: %s --mic mic.wav --ref ref.wav [--out out.wav]\n", prog);
+               "usage: %s --mic mic.wav --ref ref.wav [--out out.wav] "
+               "[--ns-dry-blend <0..1>]\n", prog);
 }
 
 bool ParseArgs(int argc, char** argv, Args* a) {
@@ -29,6 +33,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
       if (flag == "--mic") a->mic = val;
       if (flag == "--ref") a->ref = val;
       if (flag == "--out") a->out = val;
+    } else if (flag == "--ns-dry-blend" && i + 1 < argc) {
+      a->ns_dry_blend = std::stof(argv[++i]);
     } else if (flag == "-h" || flag == "--help") {
       return false;
     } else {
@@ -83,6 +89,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
+  chain.SetNsDryBlend(args.ns_dry_blend);
 
   const size_t total_frames =
       std::min(mic_wav.samples.size(), ref_wav.samples.size()) /
@@ -128,7 +135,11 @@ int main(int argc, char** argv) {
   } else {
     std::printf("  erle_db=N/A");
   }
-  std::printf("  dropped=%llu\n",
+  std::printf("  dropped=%llu",
               static_cast<unsigned long long>(s.frames_dropped));
+  if (args.ns_dry_blend > 0.0f) {
+    std::printf("  ns_dry_blend=%.3f", args.ns_dry_blend);
+  }
+  std::printf("\n");
   return 0;
 }

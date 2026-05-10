@@ -44,6 +44,9 @@ struct Args {
   std::string inject_noise;   // optional: WAV mixed into capture stream before AEC
   double inject_gain_db = -12.0;  // gain applied to injected noise before mixing
   double duration_s = 0.0;    // 0 = play stimulus to completion
+  // 0 = unchanged RNNoise (default); 0.25 caps suppression at ~-12 dB; 1 = NS
+  // bypass. See AecChain::SetNsDryBlend.
+  float ns_dry_blend = 0.0f;
   // Record-only mode: no stimulus playback, no AEC; capture from default mic and
   // dump to the given WAV. Used to record a clean near-end voice signal for
   // gen_test_input.py (the deterministic A/B harness — see Step E.2 in README).
@@ -64,6 +67,9 @@ void PrintUsage(const char* prog) {
       "  --inject-noise FILE   WAV mixed into the capture stream before AEC sees it\n"
       "                        (must match stimulus rate, mono int16; loops if shorter)\n"
       "  --inject-gain-db DB   gain applied to injected noise (default: -12.0)\n"
+      "  --ns-dry-blend FLOAT  cap NS suppression by mixing input back into output;\n"
+      "                        0 = unchanged RNNoise (default), 0.25 = -12 dB floor,\n"
+      "                        1 = NS bypass. Mitigates chopped-voice artifact on heavy noise.\n"
       "  --duration SECONDS    cap session length (default: stimulus duration; or 15 s in --record-voice mode)\n"
       "  --record-voice FILE   record-only mode: capture from the default mic for --duration seconds\n"
       "                        (default 15 s) and write a 16 kHz mono WAV. No stimulus playback,\n"
@@ -79,6 +85,7 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--out-raw" && i + 1 < argc) a->out_raw = argv[++i];
     else if (flag == "--inject-noise" && i + 1 < argc) a->inject_noise = argv[++i];
     else if (flag == "--inject-gain-db" && i + 1 < argc) a->inject_gain_db = std::stod(argv[++i]);
+    else if (flag == "--ns-dry-blend" && i + 1 < argc) a->ns_dry_blend = std::stof(argv[++i]);
     else if (flag == "--duration" && i + 1 < argc) a->duration_s = std::stod(argv[++i]);
     else if (flag == "--record-voice" && i + 1 < argc) a->record_voice = argv[++i];
     else if (flag == "-h" || flag == "--help") return false;
@@ -409,6 +416,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
+  chain.SetNsDryBlend(args.ns_dry_blend);
 
   if (ma_device_start(&cap_dev) != MA_SUCCESS) {
     std::fprintf(stderr, "ma_device_start(capture) failed\n");
