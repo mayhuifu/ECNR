@@ -320,6 +320,64 @@ done
 
 **Proves:** end-to-end AEC + NS characterization can run reproducibly without a human in the loop, unblocking parameter sweeps and Phase 3 model selection.
 
+### Step E.3 — Canned 60-second multi-scenario demo (no live voice required)
+
+Steps E / E.1 / E.2 each require something — a human speaking into the mic, or a single synthetic stimulus. Step E.3 closes that gap with a **60-second canned scenario walkthrough** built from real CC0 / public-domain recordings: the chain is exercised across cabin echo, road noise, café babble, music, stadium crowd, and dog-bark transients in one A/B you can hand to anyone.
+
+The demo files come from `reference/noise/`, which is **not committed to git** (the audio files are gitignored). One-time fetch:
+
+```sh
+scripts/fetch-noise.sh
+```
+
+`fetch-noise.sh` reads `reference/noise/MANIFEST.tsv` (the pinned URL + SHA256 + license per file, mirroring `vendor/MANIFEST.tsv`'s pattern) and:
+- auto-downloads the two archive.org sources (CC0 dog bark + public-domain Schumann music) and verifies their SHA256;
+- prints **manual-download instructions** for the three Freesound CC0 files (Freesound requires a free account for downloads, even on CC0 sounds; the script tells you exactly which URL goes to which path).
+
+Re-running is idempotent: present files at the pinned SHA256 print `ok` and do nothing. License audit summary is in [`reference/noise/README.md`](reference/noise/README.md).
+
+Compose the demo:
+
+```sh
+python3 reference/gen_combined_demo.py
+```
+
+This writes two files to `reference/synth/`:
+
+- `demo_60s_ref.wav` — the far-end stimulus (caller voice, looped). Feed this to `ecnr_bench --ref`.
+- `demo_60s_mic.wav` — the synthesized mic capture: near-end voice + cabin-IR'd echo of the far-end voice + scene noises layered across time. **This is the "before" file** — what the chain receives.
+
+Run it through the chain:
+
+```sh
+./build/ecnr_bench \
+    --mic reference/synth/demo_60s_mic.wav \
+    --ref reference/synth/demo_60s_ref.wav \
+    --out /tmp/demo_60s_after.wav
+```
+
+A/B playback (macOS):
+
+```sh
+afplay reference/synth/demo_60s_mic.wav   # before
+afplay /tmp/demo_60s_after.wav            # after
+```
+
+**What you should hear** (the timeline `gen_combined_demo.py` prints when run is the canonical reference):
+
+| Time | Scene | Source | What to listen for |
+|---|---|---|---|
+| 0–10 s | quiet baseline | — | Caller voice (in echo) + your near-end voice. After: caller voice should be substantially gone, leaving near-end. |
+| 10–20 s | car interior | Freesound CC0 | Real cabin road / engine rumble. RNNoise should suppress this cleanly — it's stationary and what NS handles best. |
+| 20–30 s | café babble | Freesound CC0 | Multi-talker babble + cutlery transients. Hardest stationary-NS case (babble has speech-like spectra); some near-end suppression is expected. |
+| 30–40 s | music | archive.org PD | Schumann's *Merry Peasant*, classical orchestral. Stresses ADR-0009 (media-aware AEC) — voice-trained NS may treat music inconsistently. |
+| 40–50 s | stadium crowd | Freesound CC0 | Football crowd "Oehh" — high-energy non-stationary. Tests the NS's behaviour on a crowd swell without overshooting. |
+| 50–60 s | dog barks | archive.org CC0 | Sparse high-amplitude transients at ~50 s and ~55 s. **Known limitation**: RNNoise leaves a residual click (the README's Phase-3 motivation text calls this out as the reason a neural RES post-filter is needed). |
+
+If any noise file is missing (e.g. you skipped the manual Freesound downloads), the composer falls back to a synthetic version of that scene where one exists, or skips the scene with a clear log line. The demo always runs end-to-end; just with sharper realism the more files you have.
+
+**Proves:** the chain handles a multi-scenario walkthrough across realistic acoustic environments — cabin echo, stationary noise, non-stationary noise, music, transients — in a single deterministic 60-second artifact. No live mic input required, fully reproducible across machines, ready to hand to a stakeholder for A/B listening.
+
 ### Step F — Re-fetch vendor (optional, slow)
 
 ```sh

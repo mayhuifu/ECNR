@@ -33,8 +33,13 @@ venv/
 # Generated test audio (regenerate locally; don't commit large WAVs)
 reference/synth/
 *.wav
+*.ogg
+*.mp3
+*.flac
+*.aac
 !reference/README.md
 !reference/**/*.md
+!reference/noise/MANIFEST.tsv
 
 # Models — large binaries; commit pointers, not weights
 models/*.tflite

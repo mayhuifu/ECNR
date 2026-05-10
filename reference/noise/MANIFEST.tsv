@@ -1,0 +1,17 @@
+# Real-recording noise samples for the canned 60s demo (gen_combined_demo.py).
+# All entries are CC0 / public-domain — no attribution required, but credited
+# in reference/noise/README.md per project's license-audit-everything discipline.
+#
+# Format (TSV): local_path<TAB>source_url<TAB>license<TAB>author_or_title<TAB>sha256<TAB>fetch_method
+#
+# fetch_method:
+#   auto     — direct URL download via scripts/fetch-noise.sh (no auth needed)
+#   manual   — Freesound login required; user clicks URL in browser, downloads,
+#              saves at local_path. fetch-noise.sh verifies SHA256 + reports missing.
+#
+# Captured: 2026-05-10
+reference/noise/dog_bark.wav	https://archive.org/download/Red_Library_Animals_Dogs/R29-52-Small%20Dog%20Barks.wav	CC0-1.0	Red Library: Animals — Small Dog Barks (R29-52)	783f53f686cd11c6b3e43a27039e8608c16ece351df946af7f0066ab1afcaf90	auto
+reference/noise/music.ogg	https://archive.org/download/100ClassicalMusicMasterpieces/1848%20Schumann%20-%20The%20Merry%20Peasant.ogg	PD	Schumann — The Merry Peasant (1848 composition; recording on Internet Archive Community Audio)	b9a00e51954877006e5b2619e23517c40d6438c00d3dcdb700c0cfafd957151a	auto
+reference/noise/cafe_babble.wav	https://freesound.org/people/Breviceps/sounds/457043/	CC0-1.0	Freesound — Busy Room Ambience by Breviceps	f2bb6c399172ed185c2d858b2a6da3c6390f1357053173af682a9180fecca053	manual
+reference/noise/stadium_crowd.wav	https://freesound.org/people/Sandermotions/sounds/494362/	CC0-1.0	Freesound — Soccer stadium Oehh by Sandermotions	12bc2e8a7504481bd5950e2ec064921fda3dd683a89889cba19fd069e0c85f04	manual
+reference/noise/car_interior.wav	https://freesound.org/people/NachtmahrTV/sounds/556692/	CC0-1.0	Freesound — Car Engine interior by NachtmahrTV	6ba337e49c4a6725781d516c9854b261e5d96ed20474e79b0ecd071841956889	manual
