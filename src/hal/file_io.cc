@@ -38,6 +38,25 @@ bool ReadWavMono(const std::string& path, WavData* out, std::string* err) {
   return true;
 }
 
+bool ReadWav(const std::string& path, WavData* out, std::string* err) {
+  SF_INFO info{};
+  SNDFILE* sf = sf_open(path.c_str(), SFM_READ, &info);
+  if (!sf) {
+    if (err) *err = std::string("sf_open: ") + sf_strerror(nullptr);
+    return false;
+  }
+  out->samples.resize(static_cast<size_t>(info.frames) * info.channels);
+  const sf_count_t got = sf_readf_short(sf, out->samples.data(), info.frames);
+  sf_close(sf);
+  if (got != info.frames) {
+    if (err) *err = "sf_readf_short returned short count";
+    return false;
+  }
+  out->sample_rate_hz = info.samplerate;
+  out->channels = info.channels;
+  return true;
+}
+
 bool WriteWavMono(const std::string& path, const std::vector<int16_t>& samples,
                   int sample_rate_hz, std::string* err) {
   SF_INFO info{};

@@ -95,8 +95,10 @@ int main(int argc, char** argv) {
   }
 
   std::string err;
+  // mic_wav preserves channel layout (ADR-0010 §5 option A); ref_wav stays
+  // mono — render is always single-channel in this chain.
   ecnr::hal::WavData mic_wav, ref_wav;
-  if (!ecnr::hal::ReadWavMono(args.mic, &mic_wav, &err)) {
+  if (!ecnr::hal::ReadWav(args.mic, &mic_wav, &err)) {
     std::fprintf(stderr, "read mic: %s\n", err.c_str());
     return 1;
   }
@@ -107,7 +109,7 @@ int main(int argc, char** argv) {
   if (!ecnr::IsSupportedSampleRate(mic_wav.sample_rate_hz) ||
       mic_wav.sample_rate_hz != ref_wav.sample_rate_hz) {
     std::fprintf(stderr,
-                 "ecnr_bench expects 16000 or 48000 Hz mono inputs, both at "
+                 "ecnr_bench expects 16000 or 48000 Hz inputs, both at "
                  "the same rate (got mic=%d, ref=%d).\n",
                  mic_wav.sample_rate_hz, ref_wav.sample_rate_hz);
     return 1;
@@ -115,31 +117,47 @@ int main(int argc, char** argv) {
   const int sample_rate_hz = mic_wav.sample_rate_hz;
   const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
 
-  // ADR-0004 fixes the production mic-count contract at [2, 8]; this offline
-  // harness's mono input is duplicated into ch[0] + ch[1] (a 2-mic shape).
-  // Two paths per ADR-0010:
-  //   - --bypass-beamformer: chain inits with kPassthroughGeometry, picks
-  //     ch[0] verbatim. Right for mono input.
-  //   - default (DSB active): chain inits with a placeholder 2-mic linear
-  //     geometry (4 cm along +x, target +x). For bit-identical channels
-  //     the Beamformer logs a one-shot warning and produces mildly
-  //     attenuated output (sub-sample-delayed average); to silence the
-  //     warning, either pass --bypass-beamformer or supply real multi-
-  //     channel input (lands in a follow-up commit).
-  ecnr::AecChain chain;
-  bool chain_ok = false;
-  if (args.bypass_beamformer) {
-    chain_ok = chain.Init(sample_rate_hz, 2);
+  // Mic channel layout drives num_mics. A 1-channel file is duplicated into
+  // ch[0]+ch[1] (Phase-0.5 default, degenerate for DSB → bypass recommended).
+  // A 2..kMaxMics file routes channels directly to Frame::ch[c] (ADR-0010
+  // §5 option A). >kMaxMics is rejected.
+  const int file_mic_channels = mic_wav.channels;
+  int num_mics = 0;
+  if (file_mic_channels == 1) {
+    num_mics = 2;  // duplicate-into-2 fallback
+  } else if (file_mic_channels >= 2 && file_mic_channels <= ecnr::kMaxMics) {
+    num_mics = file_mic_channels;
   } else {
-    ecnr::MicGeometry geom{};
-    geom.positions_m[0] = {-0.02f, 0.0f, 0.0f};
-    geom.positions_m[1] = { 0.02f, 0.0f, 0.0f};
-    geom.target_direction = {1.0f, 0.0f, 0.0f};
-    geom.speed_of_sound_mps = 343.0f;
-    chain_ok = chain.Init(sample_rate_hz, 2, geom);
+    std::fprintf(stderr,
+                 "ecnr_bench: mic WAV has %d channels; expected 1 (duplicated) "
+                 "or 2..%d (multi-mic capture).\n",
+                 file_mic_channels, ecnr::kMaxMics);
+    return 1;
   }
+
+  // Geometry for the DSB path: a uniform linear array along +x, centred on
+  // the origin, with 4 cm inter-mic spacing and the target direction at +x.
+  // This is a placeholder per ADR-0010 §"Open assumptions" — once a U300
+  // recording lands with the real array geometry, callers can pass a
+  // matching MicGeometry through AecChain::Init's 3-arg overload.
+  constexpr float kPlaceholderSpacingM = 0.04f;
+  ecnr::MicGeometry placeholder_geom{};
+  for (int c = 0; c < num_mics; ++c) {
+    const float x = (static_cast<float>(c) -
+                     (static_cast<float>(num_mics) - 1.0f) * 0.5f) *
+                    kPlaceholderSpacingM;
+    placeholder_geom.positions_m[c] = {x, 0.0f, 0.0f};
+  }
+  placeholder_geom.target_direction = {1.0f, 0.0f, 0.0f};
+  placeholder_geom.speed_of_sound_mps = 343.0f;
+
+  ecnr::AecChain chain;
+  const bool chain_ok = args.bypass_beamformer
+      ? chain.Init(sample_rate_hz, num_mics)
+      : chain.Init(sample_rate_hz, num_mics, placeholder_geom);
   if (!chain_ok) {
-    std::fprintf(stderr, "chain init failed\n");
+    std::fprintf(stderr, "chain init failed (rate=%d, num_mics=%d)\n",
+                 sample_rate_hz, num_mics);
     return 1;
   }
   // --ns-vad-blend (Step B) supersedes --ns-dry-blend (Step A) when both
@@ -150,8 +168,13 @@ int main(int argc, char** argv) {
     chain.SetNsDryBlend(args.ns_dry_blend);
   }
 
+  // mic_wav.samples is interleaved; total frame count is bounded by both
+  // the mic and ref durations (whichever is shorter wins; render frames
+  // beyond either side just pad with zero).
+  const size_t mic_frames_available =
+      mic_wav.samples.size() / static_cast<size_t>(file_mic_channels);
   const size_t total_frames =
-      std::min(mic_wav.samples.size(), ref_wav.samples.size()) /
+      std::min(mic_frames_available, ref_wav.samples.size()) /
       static_cast<size_t>(frame_samples);
   std::vector<int16_t> processed;
   processed.reserve(total_frames * frame_samples);
@@ -164,13 +187,28 @@ int main(int argc, char** argv) {
     ref_f.n_channels = 1;
     std::memcpy(ref_f.ch[0].data(), ref_wav.samples.data() + off,
                 frame_samples * sizeof(int16_t));
-    // Mic is 2-channel; duplicate the mono input into ch[0] and ch[1].
+    // Mic: route file channels into Frame::ch[c]. Mono file is duplicated
+    // into both channels (Phase-0.5 fallback); multi-channel file is
+    // de-interleaved straight into ch[0..N-1].
     mic_f.n_samples = frame_samples;
-    mic_f.n_channels = 2;
-    std::memcpy(mic_f.ch[0].data(), mic_wav.samples.data() + off,
-                frame_samples * sizeof(int16_t));
-    std::memcpy(mic_f.ch[1].data(), mic_wav.samples.data() + off,
-                frame_samples * sizeof(int16_t));
+    mic_f.n_channels = num_mics;
+    if (file_mic_channels == 1) {
+      std::memcpy(mic_f.ch[0].data(), mic_wav.samples.data() + off,
+                  frame_samples * sizeof(int16_t));
+      std::memcpy(mic_f.ch[1].data(), mic_wav.samples.data() + off,
+                  frame_samples * sizeof(int16_t));
+    } else {
+      const size_t inter_off = off * static_cast<size_t>(file_mic_channels);
+      for (int c = 0; c < num_mics; ++c) {
+        for (int s = 0; s < frame_samples; ++s) {
+          mic_f.ch[c][s] =
+              mic_wav.samples[inter_off +
+                              static_cast<size_t>(s) *
+                                  static_cast<size_t>(file_mic_channels) +
+                              static_cast<size_t>(c)];
+        }
+      }
+    }
 
     chain.ProcessRender(ref_f);
     chain.ProcessCapture(mic_f, out_f);
@@ -187,8 +225,10 @@ int main(int argc, char** argv) {
   // erle_db is sourced from APM stats (Task 6); under the Phase-0 stub the
   // optional is nullopt and we print N/A. Once the WebRTC backend lands,
   // the same code path emits the real value without a label change.
-  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f",
-              total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf());
+  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f  mic_ch=%d  bf=%s",
+              total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf(),
+              file_mic_channels,
+              args.bypass_beamformer ? "bypass" : "dsb");
   if (s.echo_return_loss_enhancement_db.has_value()) {
     std::printf("  erle_db=%.2f", *s.echo_return_loss_enhancement_db);
   } else {
