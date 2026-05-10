@@ -193,6 +193,38 @@ TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {
   EXPECT_FALSE(c.Stats().divergent_filter_fraction.has_value());
 }
 
+TEST(AecChain, RejectsMisshapedFrame) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(16000, 2));
+
+  // Init at 16k expects 160-sample frames. Feed a 480-sample (48k-shaped) frame.
+  Frame far, mic, out;
+  far.n_samples = kFrameSamples48k;   // wrong: chain is at 16k
+  far.n_channels = 1;
+  c.ProcessRender(far);
+
+  mic.n_samples = kFrameSamples48k;   // wrong: chain is at 16k
+  mic.n_channels = 2;
+  c.ProcessCapture(mic, out);
+
+  // Both calls should have been dropped.
+  EXPECT_GE(c.Stats().frames_dropped, 2u);
+
+  // Wrong channel count: chain init at num_mics=2, but mic_in.n_channels=3
+  Frame mic_wrong_ch;
+  mic_wrong_ch.n_samples = kFrameSamples16k;
+  mic_wrong_ch.n_channels = 3;
+  c.ProcessCapture(mic_wrong_ch, out);
+  EXPECT_GE(c.Stats().frames_dropped, 3u);
+
+  // Wrong render channels: render must be mono (n_channels == 1)
+  Frame far_wrong_ch;
+  far_wrong_ch.n_samples = kFrameSamples16k;
+  far_wrong_ch.n_channels = 2;
+  c.ProcessRender(far_wrong_ch);
+  EXPECT_GE(c.Stats().frames_dropped, 4u);
+}
+
 TEST(AecChain, RtfIsMeasured) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 2));

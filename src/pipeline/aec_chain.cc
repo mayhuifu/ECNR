@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 #include "core/frame.h"
@@ -93,8 +94,15 @@ void AecChain::ProcessRender(const Frame& render) {
   // in non-debug builds; assert in debug.
   assert(render.n_channels == 1);
   assert(render.n_samples == FrameSamplesFor(impl_->sample_rate_hz));
-  if (render.n_channels != 1) return;
-  if (render.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) return;
+  if (render.n_channels != 1 ||
+      render.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) {
+    std::fprintf(stderr,
+        "AecChain::ProcessRender: dropping frame (n_channels=%d expected=1, n_samples=%d expected=%d)\n",
+        render.n_channels, render.n_samples,
+        FrameSamplesFor(impl_->sample_rate_hz));
+    ++impl_->stats.frames_dropped;
+    return;
+  }
 
   const auto t0 = std::chrono::steady_clock::now();
   impl_->aec.ProcessRender(render);
@@ -106,8 +114,15 @@ void AecChain::ProcessRender(const Frame& render) {
 void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
   assert(mic_in.n_channels == impl_->num_mics);
   assert(mic_in.n_samples == FrameSamplesFor(impl_->sample_rate_hz));
-  if (mic_in.n_channels != impl_->num_mics) return;
-  if (mic_in.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) return;
+  if (mic_in.n_channels != impl_->num_mics ||
+      mic_in.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) {
+    std::fprintf(stderr,
+        "AecChain::ProcessCapture: dropping frame (n_channels=%d expected=%d, n_samples=%d expected=%d)\n",
+        mic_in.n_channels, impl_->num_mics, mic_in.n_samples,
+        FrameSamplesFor(impl_->sample_rate_hz));
+    ++impl_->stats.frames_dropped;
+    return;
+  }
 
   const auto t0 = std::chrono::steady_clock::now();
 

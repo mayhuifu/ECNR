@@ -179,6 +179,10 @@ int main(int argc, char** argv) {
   // the mono capture into ch[0] and ch[1]. The Beamformer stub picks ch[0],
   // so the duplicate channel is a no-op but keeps the chain interface
   // honest with the production contract.
+  // TODO(ADR-0010): mono-duplicated 2-channel input is degenerate for any real
+  // beamformer (zero inter-mic delay; perfectly correlated channels — singular
+  // covariance under MVDR). Once the real beamformer lands, this harness should
+  // either accept multi-channel WAV input or add a --bypass-beamformer flag.
   ecnr::AecChain chain;
   if (!chain.Init(sample_rate_hz, 2)) {
     std::fprintf(stderr, "chain init failed\n");
@@ -277,8 +281,9 @@ int main(int argc, char** argv) {
   } else {
     std::printf("  erle_db=N/A");
   }
-  std::printf("  cap_dropped=%llu  ref_dropped=%llu\n",
+  std::printf("  cap_dropped=%llu  ref_dropped=%llu  chain_dropped=%llu\n",
               static_cast<unsigned long long>(st.capture_dropped.load()),
-              static_cast<unsigned long long>(st.render_dropped.load()));
+              static_cast<unsigned long long>(st.render_dropped.load()),
+              static_cast<unsigned long long>(s.frames_dropped));
   return 0;
 }

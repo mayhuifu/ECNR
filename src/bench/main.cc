@@ -74,6 +74,10 @@ int main(int argc, char** argv) {
   // chain at num_mics = 2 and duplicating the mono signal into ch[0] and
   // ch[1]. The Beamformer stub picks ch[0], so the duplicated channel has
   // no effect on the processed output but keeps the chain interface honest.
+  // TODO(ADR-0010): mono-duplicated 2-channel input is degenerate for any real
+  // beamformer (zero inter-mic delay; perfectly correlated channels — singular
+  // covariance under MVDR). Once the real beamformer lands, this harness should
+  // either accept multi-channel WAV input or add a --bypass-beamformer flag.
   ecnr::AecChain chain;
   if (!chain.Init(sample_rate_hz, 2)) {
     std::fprintf(stderr, "chain init failed\n");
@@ -120,9 +124,11 @@ int main(int argc, char** argv) {
   std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f",
               total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf());
   if (s.echo_return_loss_enhancement_db.has_value()) {
-    std::printf("  erle_db=%.2f\n", *s.echo_return_loss_enhancement_db);
+    std::printf("  erle_db=%.2f", *s.echo_return_loss_enhancement_db);
   } else {
-    std::printf("  erle_db=N/A\n");
+    std::printf("  erle_db=N/A");
   }
+  std::printf("  dropped=%llu\n",
+              static_cast<unsigned long long>(s.frames_dropped));
   return 0;
 }

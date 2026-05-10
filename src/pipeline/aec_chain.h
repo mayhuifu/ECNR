@@ -44,6 +44,11 @@ struct ChainStats {
   // divergent_filter_fraction.
   std::optional<double> divergent_filter_fraction;
 
+  // Counts capture/render frames the chain refused due to shape mismatches
+  // (wrong rate, wrong channel count, wrong frame size). Should always be 0
+  // in healthy callers; non-zero is a bug in upstream HAL or harness code.
+  uint64_t frames_dropped = 0;
+
   // Real-Time Factor: cpu_time / audio_time. < 1.0 = faster than realtime.
   double Rtf() const {
     return audio_time_s > 0.0 ? cpu_time_s / audio_time_s : 0.0;

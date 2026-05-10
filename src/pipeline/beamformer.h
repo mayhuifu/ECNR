@@ -17,6 +17,9 @@ class Beamformer {
 
   // Initialize for a specific (rate, mic_count). Both must be supported
   // (see IsSupportedSampleRate, IsSupportedMicCount). Returns false otherwise.
+  // TODO(ADR-0010): real beamformer (MVDR/GSC) will need a geometry hint
+  // (mic spacing or coords). Add as a separate setter or an extended Init
+  // overload to avoid breaking this signature.
   bool Init(int sample_rate_hz, int num_mics);
 
   // multi -> mono. Asserts mic_in.n_channels == configured num_mics and
