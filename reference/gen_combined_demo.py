@@ -44,8 +44,12 @@ import wave
 import numpy as np  # type: ignore
 
 SR = 16000
-DURATION_S = 60.0
-N_TOTAL = int(DURATION_S * SR)
+
+# Two duration profiles. The long variant (60 s, 10 s scenes) is the headline
+# walkthrough; the short variant (30 s, 5 s scenes) is the easier-to-A/B
+# version for quick demos and parameter sweeps. Selected via --short.
+LONG_DURATION_S = 60.0
+SHORT_DURATION_S = 30.0
 
 # Path map. `path` is the preferred file; `fallback` is the synthetic version.
 # Either may be absent; the composer uses whichever exists, and skips the scene
@@ -109,7 +113,7 @@ SOURCES = {
 # so a single number consistently means "noise level in the mic mix relative
 # to a -20 dBFS reference." Numbers chosen so a sum of two overlapping scenes
 # stays under full-scale with the near-end + echo also present.
-SCENES = [
+SCENES_LONG = [
     (10.0, 10.0, "car interior",  "car_interior",  -8.0),
     (20.0, 10.0, "cafe babble",   "cafe_babble",   -10.0),
     (30.0, 10.0, "music",         "music",         -14.0),
@@ -117,6 +121,16 @@ SCENES = [
     # Dog barks: two well-separated transients in the last segment.
     (50.0,  3.0, "dog bark #1",   "dog_bark",      -3.0),
     (55.0,  3.0, "dog bark #2",   "dog_bark",      -3.0),
+]
+
+# Short timeline (30 s total). Same scene order, half the time per scene.
+# Dog bark slot only fits one transient instead of two.
+SCENES_SHORT = [
+    ( 5.0, 5.0, "car interior",  "car_interior",  -8.0),
+    (10.0, 5.0, "cafe babble",   "cafe_babble",   -10.0),
+    (15.0, 5.0, "music",         "music",         -14.0),
+    (20.0, 5.0, "stadium crowd", "stadium_crowd", -10.0),
+    (25.0, 2.5, "dog bark",      "dog_bark",      -3.0),
 ]
 
 # Speaker→mic acoustic path is modeled as TWO components added together:
@@ -285,7 +299,7 @@ def main() -> int:
     p.add_argument(
         "--out-dir",
         default="reference/synth",
-        help="output directory for demo_60s_*.wav (default: reference/synth)",
+        help="output directory for demo_{30,60}s_*.wav (default: reference/synth)",
     )
     p.add_argument(
         "--root",
@@ -297,7 +311,24 @@ def main() -> int:
         action="store_true",
         help="print the scene resolution table and exit; don't write any output",
     )
+    p.add_argument(
+        "--short",
+        action="store_true",
+        help=(
+            "produce the 30-second variant (5-second scenes) — easier to A/B "
+            "and quicker to listen through. Output files are written as "
+            "demo_30s_*.wav and coexist with demo_60s_*.wav."
+        ),
+    )
     args = p.parse_args()
+
+    # Profile selection. `out_prefix` is what discriminates the two variants
+    # on disk so the long and short demos can coexist without overwriting
+    # each other.
+    duration_s = SHORT_DURATION_S if args.short else LONG_DURATION_S
+    n_total = int(duration_s * SR)
+    scenes = SCENES_SHORT if args.short else SCENES_LONG
+    out_prefix = "demo_30s" if args.short else "demo_60s"
 
     root = pathlib.Path(args.root).resolve()
     out_dir = pathlib.Path(args.out_dir)
@@ -305,8 +336,8 @@ def main() -> int:
         out_dir = root / out_dir
 
     # Resolve every source up front so the timeline log is honest.
-    print(f"# composing 60s demo from sources rooted at {root}")
-    print(f"#   output: {out_dir}/demo_60s_{{ref,mic}}.wav")
+    print(f"# composing {duration_s:.0f}s demo from sources rooted at {root}")
+    print(f"#   output: {out_dir}/{out_prefix}_{{ref,mic}}.wav")
     print()
     print(f"# {'key':<14} {'kind':<8} {'path'}")
     resolved: dict[str, tuple[pathlib.Path | None, str]] = {}
@@ -328,7 +359,7 @@ def main() -> int:
 
     if args.print_timeline:
         print("# scene timeline (would be applied):")
-        for start_s, dur_s, name, key, gain_db in SCENES:
+        for start_s, dur_s, name, key, gain_db in scenes:
             path, kind = resolved[key]
             tag = "real" if kind == "real" else ("synthetic fallback" if kind == "fallback" else "SKIP — missing")
             print(f"#   {start_s:5.1f}–{start_s + dur_s:5.1f}s  {name:<16}  gain={gain_db:+5.1f} dB  [{tag}]")
@@ -372,15 +403,15 @@ def main() -> int:
     ref_path, _ = resolved["ref_voice"]
     assert ref_path is not None
     ref_src = _load_and_normalize_voice("ref_voice", ref_path)
-    ref_full = loop_or_clip(ref_src, N_TOTAL)
-    write_wav_mono_16k(out_dir / "demo_60s_ref.wav", ref_full)
+    ref_full = loop_or_clip(ref_src, n_total)
+    write_wav_mono_16k(out_dir / f"{out_prefix}_ref.wav", ref_full)
 
     # ------------------------- Build the mic stream -------------------------
     # 1. Near-end voice (looped voice_synth) — what AEC must preserve
     near_path, _ = resolved["near_voice"]
     assert near_path is not None
     near_src = _load_and_normalize_voice("near_voice", near_path)
-    near_full = loop_or_clip(near_src, N_TOTAL)
+    near_full = loop_or_clip(near_src, n_total)
     near_gain = 10.0 ** (NEAR_GAIN_DB / 20.0)
 
     # 2a. Direct-coupling path: ref voice into mic at a small fixed delay,
@@ -388,16 +419,16 @@ def main() -> int:
     # the caller voice perceptibly recognizable in the before file.
     direct_delay_n = int(DIRECT_COUPLING_DELAY_MS * 1e-3 * SR)
     direct_gain_lin = 10.0 ** (DIRECT_COUPLING_GAIN_DB / 20.0)
-    direct_full = np.zeros(N_TOTAL, dtype=np.float64)
-    if direct_delay_n < N_TOTAL:
-        copy_n = N_TOTAL - direct_delay_n
+    direct_full = np.zeros(n_total, dtype=np.float64)
+    if direct_delay_n < n_total:
+        copy_n = n_total - direct_delay_n
         direct_full[direct_delay_n:] = direct_gain_lin * ref_full[:copy_n]
 
     # 2b. Echo path: ref convolved with cabin IR, scaled (the reverberant tail).
     cabin_ir_path, _ = resolved["cabin_ir"]
     assert cabin_ir_path is not None
     cabin_ir = load_via_ffmpeg(cabin_ir_path)
-    echo_full = np.convolve(ref_full, cabin_ir)[:N_TOTAL] * ECHO_GAIN
+    echo_full = np.convolve(ref_full, cabin_ir)[:n_total] * ECHO_GAIN
 
     mic = near_gain * near_full + direct_full + echo_full
     # Parallel buffers used by the two live-test paths:
@@ -417,11 +448,11 @@ def main() -> int:
     #                     than played through the speakers. The boost makes it
     #                     audible over live voice + speaker echo without the
     #                     user having to crank --inject-gain-db.
-    noise_only_raw = np.zeros(N_TOTAL, dtype=np.float64)
+    noise_only_raw = np.zeros(n_total, dtype=np.float64)
 
     # 3. Per-scene noise overlays
     print("# applying scenes:")
-    for start_s, dur_s, name, key, gain_db in SCENES:
+    for start_s, dur_s, name, key, gain_db in scenes:
         path, kind = resolved[key]
         if path is None:
             print(f"  SKIP    {start_s:5.1f}–{start_s + dur_s:5.1f}s  {name}  (file missing)")
@@ -429,8 +460,8 @@ def main() -> int:
 
         scene_n = int(dur_s * SR)
         start_n = int(start_s * SR)
-        if start_n + scene_n > N_TOTAL:
-            scene_n = N_TOTAL - start_n
+        if start_n + scene_n > n_total:
+            scene_n = n_total - start_n
             if scene_n <= 0:
                 continue
 
@@ -486,19 +517,19 @@ def main() -> int:
     if sm_peak > 0.99:
         speaker_mix *= 0.99 / sm_peak
 
-    write_wav_mono_16k(out_dir / "demo_60s_mic.wav", mic)
-    write_wav_mono_16k(out_dir / "demo_60s_noise.wav", noise_only_boosted)
-    write_wav_mono_16k(out_dir / "demo_60s_speaker_mix.wav", speaker_mix)
+    write_wav_mono_16k(out_dir / f"{out_prefix}_mic.wav", mic)
+    write_wav_mono_16k(out_dir / f"{out_prefix}_noise.wav", noise_only_boosted)
+    write_wav_mono_16k(out_dir / f"{out_prefix}_speaker_mix.wav", speaker_mix)
     print()
-    print(f"wrote {out_dir}/demo_60s_{{ref,mic,noise,speaker_mix}}.wav  "
-          f"({DURATION_S:.0f}s @ {SR // 1000} kHz mono)")
+    print(f"wrote {out_dir}/{out_prefix}_{{ref,mic,noise,speaker_mix}}.wav  "
+          f"({duration_s:.0f}s @ {SR // 1000} kHz mono)")
     print()
     print("next: ./build/ecnr_bench \\")
-    print(f"        --mic {out_dir}/demo_60s_mic.wav \\")
-    print(f"        --ref {out_dir}/demo_60s_ref.wav \\")
-    print("        --out /tmp/demo_60s_after.wav")
-    print(f"      afplay {out_dir}/demo_60s_mic.wav   # before")
-    print("      afplay /tmp/demo_60s_after.wav        # after")
+    print(f"        --mic {out_dir}/{out_prefix}_mic.wav \\")
+    print(f"        --ref {out_dir}/{out_prefix}_ref.wav \\")
+    print(f"        --out /tmp/{out_prefix}_after.wav")
+    print(f"      afplay {out_dir}/{out_prefix}_mic.wav   # before")
+    print(f"      afplay /tmp/{out_prefix}_after.wav        # after")
     return 0
 
 

@@ -363,13 +363,16 @@ python3 reference/gen_combined_demo.py --print-timeline
 Compose the demo:
 
 ```sh
-python3 reference/gen_combined_demo.py
+python3 reference/gen_combined_demo.py            # 60 s walkthrough (10 s scenes)
+python3 reference/gen_combined_demo.py --short    # 30 s walkthrough (5 s scenes)
 ```
 
-This writes two files to `reference/synth/`:
+`--short` is the quick-A/B variant. Same scenes in the same order, half the duration each — easier to listen through end-to-end and to compare side by side when sweeping `--ns-dry-blend` / `--ns-vad-blend` values. Outputs land as `demo_30s_*.wav` so the long and short variants coexist on disk without overwriting each other.
 
-- `demo_60s_ref.wav` — the far-end stimulus (caller voice, looped). Feed this to `ecnr_bench --ref`.
-- `demo_60s_mic.wav` — the synthesized mic capture: near-end voice + cabin-IR'd echo of the far-end voice + scene noises layered across time. **This is the "before" file** — what the chain receives.
+This writes two files (per variant) to `reference/synth/`:
+
+- `demo_{60,30}s_ref.wav` — the far-end stimulus (caller voice, looped). Feed this to `ecnr_bench --ref`.
+- `demo_{60,30}s_mic.wav` — the synthesized mic capture: near-end voice + cabin-IR'd echo of the far-end voice + scene noises layered across time. **This is the "before" file** — what the chain receives.
 
 Run it through the chain:
 
