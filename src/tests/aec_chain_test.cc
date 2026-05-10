@@ -11,40 +11,81 @@
 namespace ecnr {
 namespace {
 
-// Fills `f` with white noise scaled to roughly half-scale int16.
-void FillNoise(Frame& f, std::mt19937& rng) {
+// Fills `f` with white noise scaled to roughly half-scale int16. Populates
+// n_samples + n_channels and writes ch[0..n_channels)[0..n_samples).
+// Defaults: 16 kHz frame, 2 mics. Caller may override before calling.
+void FillNoise(Frame& f, std::mt19937& rng,
+               int sample_rate_hz = 16000, int num_channels = 2) {
   std::uniform_int_distribution<int> dist(-16384, 16384);
-  for (auto& s : f.samples) s = static_cast<int16_t>(dist(rng));
+  f.n_samples = FrameSamplesFor(sample_rate_hz);
+  f.n_channels = num_channels;
+  for (int c = 0; c < num_channels; ++c) {
+    for (int s = 0; s < f.n_samples; ++s) {
+      f.ch[c][s] = static_cast<int16_t>(dist(rng));
+    }
+  }
 }
 
-// Mixes far-end echo into a clean near-end frame: out = near + alpha * far.
+// Mixes a far-end echo into a clean near-end frame. Both inputs are mono
+// (operate on ch[0]); output is mono. out = near + alpha * far.
 void MixEcho(const Frame& near, const Frame& far, double alpha, Frame& out) {
-  for (int i = 0; i < kFrameSamples; ++i) {
+  out.n_samples = near.n_samples;
+  out.n_channels = 1;
+  for (int i = 0; i < near.n_samples; ++i) {
     const int32_t y =
-        static_cast<int32_t>(near.samples[i]) +
-        static_cast<int32_t>(std::round(alpha * far.samples[i]));
-    out.samples[i] = static_cast<int16_t>(std::clamp(y, -32768, 32767));
+        static_cast<int32_t>(near.ch[0][i]) +
+        static_cast<int32_t>(std::round(alpha * far.ch[0][i]));
+    out.ch[0][i] = static_cast<int16_t>(std::clamp(y, -32768, 32767));
   }
 }
 
 TEST(AecChain, InitRejectsWrongSampleRate) {
   AecChain c;
-  EXPECT_FALSE(c.Init(8000));
-  EXPECT_FALSE(c.Init(48000));
-  EXPECT_TRUE(c.Init(kSampleRateHz));
+  EXPECT_FALSE(c.Init(8000, 2));
+  EXPECT_FALSE(c.Init(24000, 2));
+  EXPECT_FALSE(c.Init(32000, 2));
+  EXPECT_FALSE(c.Init(44100, 2));
+  EXPECT_TRUE(c.Init(16000, 2));
+}
+
+TEST(AecChain, InitRejectsWrongMicCount) {
+  // ADR-0004: production num_mics ∈ [2, 8].
+  AecChain c0;
+  EXPECT_FALSE(c0.Init(16000, 0));
+  AecChain c_neg;
+  EXPECT_FALSE(c_neg.Init(16000, -1));
+  AecChain c1;
+  EXPECT_FALSE(c1.Init(16000, 1));
+  AecChain c9;
+  EXPECT_FALSE(c9.Init(16000, 9));
+  AecChain c2;
+  EXPECT_TRUE(c2.Init(16000, 2));
+  AecChain c4;
+  EXPECT_TRUE(c4.Init(16000, 4));
+  AecChain c8;
+  EXPECT_TRUE(c8.Init(16000, kMaxMics));
+}
+
+TEST(AecChain, AcceptsBoth16kAnd48k) {
+  AecChain c1; ASSERT_TRUE(c1.Init(16000, 2));
+  AecChain c2; ASSERT_TRUE(c2.Init(48000, 2));
 }
 
 // Smoke test: feed correlated render + capture (capture = render echoed) and
-// expect the chain to attenuate the capture energy. Phase 0 stub uses a simple
-// alpha-subtraction so we only assert that *some* attenuation happens — Phase
-// 0.5 will tighten this to ERLE > 10 dB once AEC3 lands.
+// expect the chain to attenuate the capture energy. The Beamformer collapses
+// the multi-mic capture to mono (ch[0]), so we drive both mics with the same
+// echoed signal — what AEC sees post-beamform is unchanged from the previous
+// single-channel test. Phase 0 stub uses a simple alpha-subtraction so we
+// only assert that *some* attenuation happens; Phase 0.5 will tighten this.
 TEST(AecChain, AttenuatesCorrelatedEcho) {
   AecChain c;
-  ASSERT_TRUE(c.Init(kSampleRateHz));
+  ASSERT_TRUE(c.Init(16000, 2));
 
   std::mt19937 rng(0x1234);
   Frame zero_near{};
-  Frame far, mic, out;
+  zero_near.n_samples = FrameSamplesFor(16000);
+  zero_near.n_channels = 1;
+  Frame far, mic_mono, mic, out;
   // Echo gain != stub alpha (0.7) so the stub leaves a measurable residual
   // rather than perfectly cancelling.
   constexpr double kEchoGain = 0.5;
@@ -54,14 +95,22 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   double cumulative_in_e = 0.0;
   double cumulative_out_e = 0.0;
   for (int i = 0; i < 200; ++i) {
-    FillNoise(far, rng);
-    MixEcho(zero_near, far, kEchoGain, mic);
+    // Render is mono.
+    FillNoise(far, rng, 16000, 1);
+    // Build the mono echoed mic, then duplicate into a 2-channel mic frame.
+    MixEcho(zero_near, far, kEchoGain, mic_mono);
+    mic.n_samples = FrameSamplesFor(16000);
+    mic.n_channels = 2;
+    for (int s = 0; s < mic.n_samples; ++s) {
+      mic.ch[0][s] = mic_mono.ch[0][s];
+      mic.ch[1][s] = mic_mono.ch[0][s];
+    }
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
     if (i >= 50) {
-      for (int j = 0; j < kFrameSamples; ++j) {
-        const double xin = static_cast<double>(mic.samples[j]) / 32768.0;
-        const double xout = static_cast<double>(out.samples[j]) / 32768.0;
+      for (int j = 0; j < FrameSamplesFor(16000); ++j) {
+        const double xin = static_cast<double>(mic.ch[0][j]) / 32768.0;
+        const double xout = static_cast<double>(out.ch[0][j]) / 32768.0;
         cumulative_in_e += xin * xin;
         cumulative_out_e += xout * xout;
       }
@@ -76,9 +125,39 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   EXPECT_GT(erle_db, 5.0) << "Phase 0 stub AEC failed to attenuate echo";
 }
 
+TEST(AecChain, BeamformerStubCollapsesToCh0) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(16000, 4));
+  std::mt19937 rng(0xb44b);
+
+  // Construct a 4-mic capture with distinct content per channel; only ch[0]
+  // should propagate through the stub beamformer.
+  Frame mic, render, out;
+  mic.n_samples = FrameSamplesFor(16000);
+  mic.n_channels = 4;
+  for (int ch = 0; ch < 4; ++ch) {
+    std::uniform_int_distribution<int> dist(-1000 - ch * 100, 1000 + ch * 100);
+    for (int s = 0; s < mic.n_samples; ++s) mic.ch[ch][s] = dist(rng);
+  }
+  // Render is silence (mono).
+  render.n_samples = FrameSamplesFor(16000);
+  render.n_channels = 1;
+
+  c.ProcessRender(render);
+  c.ProcessCapture(mic, out);
+
+  ASSERT_EQ(out.n_channels, 1);
+  ASSERT_EQ(out.n_samples, FrameSamplesFor(16000));
+  // Stub AEC subtracts render * alpha; render is silence, so out should
+  // equal beamformer output, which equals mic.ch[0]. Spot-check a few samples.
+  for (int s = 0; s < 10; ++s) {
+    EXPECT_EQ(out.ch[0][s], mic.ch[0][s]) << "stub beamformer should pass ch[0] through; sample " << s;
+  }
+}
+
 TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
   AecChain c;
-  ASSERT_TRUE(c.Init(kSampleRateHz));
+  ASSERT_TRUE(c.Init(16000, 2));
   // Stub backend has no public getter; we only verify the call is total
   // (no crash for any int) and that boundary + out-of-range values are
   // accepted silently per the clamp contract in ADR-0006.
@@ -95,12 +174,12 @@ TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
 
 TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {
   AecChain c;
-  ASSERT_TRUE(c.Init(kSampleRateHz));
+  ASSERT_TRUE(c.Init(16000, 2));
   std::mt19937 rng(0x1111);
   Frame far, mic, out;
   for (int i = 0; i < 10; ++i) {
-    FillNoise(far, rng);
-    FillNoise(mic, rng);
+    FillNoise(far, rng, 16000, 1);
+    FillNoise(mic, rng, 16000, 2);
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
   }
@@ -116,12 +195,12 @@ TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {
 
 TEST(AecChain, RtfIsMeasured) {
   AecChain c;
-  ASSERT_TRUE(c.Init(kSampleRateHz));
+  ASSERT_TRUE(c.Init(16000, 2));
   std::mt19937 rng(0x5678);
   Frame far, mic, out;
   for (int i = 0; i < 10; ++i) {
-    FillNoise(far, rng);
-    FillNoise(mic, rng);
+    FillNoise(far, rng, 16000, 1);
+    FillNoise(mic, rng, 16000, 2);
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
   }

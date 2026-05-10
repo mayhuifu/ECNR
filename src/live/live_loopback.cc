@@ -63,8 +63,11 @@ bool ParseArgs(int argc, char** argv, Args* a) {
 // callbacks write to capture_ring + render_ring, the processing thread reads.
 struct LiveState {
   std::mutex mu;
-  ecnr::RingBuffer capture_ring{static_cast<size_t>(ecnr::kSampleRateHz)};  // 1 s capacity
-  ecnr::RingBuffer render_ring{static_cast<size_t>(ecnr::kSampleRateHz)};
+  // 1 second of capacity at the maximum supported rate. Sized to the upper
+  // bound (48 kHz) so the same struct works for either tier; over-provisioning
+  // ~96 KB per ring is harmless on host.
+  ecnr::RingBuffer capture_ring{48000};
+  ecnr::RingBuffer render_ring{48000};
 
   // Stimulus playback cursor.
   std::vector<int16_t> stimulus;
@@ -129,11 +132,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "read stimulus: %s\n", err.c_str());
     return 1;
   }
-  if (stim.sample_rate_hz != ecnr::kSampleRateHz) {
-    std::fprintf(stderr, "stimulus must be %d Hz mono (got %d Hz)\n",
-                 ecnr::kSampleRateHz, stim.sample_rate_hz);
+  if (!ecnr::IsSupportedSampleRate(stim.sample_rate_hz)) {
+    std::fprintf(stderr,
+                 "stimulus must be 16000 or 48000 Hz mono (got %d Hz)\n",
+                 stim.sample_rate_hz);
     return 1;
   }
+  const int sample_rate_hz = stim.sample_rate_hz;
+  const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
 
   LiveState st;
   st.stimulus = std::move(stim.samples);
@@ -144,7 +150,7 @@ int main(int argc, char** argv) {
   ma_device_config play_cfg = ma_device_config_init(ma_device_type_playback);
   play_cfg.playback.format   = ma_format_s16;
   play_cfg.playback.channels = 1;
-  play_cfg.sampleRate        = ecnr::kSampleRateHz;
+  play_cfg.sampleRate        = static_cast<ma_uint32>(sample_rate_hz);
   play_cfg.dataCallback      = PlaybackCallback;
   play_cfg.pUserData         = &st;
 
@@ -157,7 +163,7 @@ int main(int argc, char** argv) {
   ma_device_config cap_cfg = ma_device_config_init(ma_device_type_capture);
   cap_cfg.capture.format   = ma_format_s16;
   cap_cfg.capture.channels = 1;
-  cap_cfg.sampleRate       = ecnr::kSampleRateHz;
+  cap_cfg.sampleRate       = static_cast<ma_uint32>(sample_rate_hz);
   cap_cfg.dataCallback     = CaptureCallback;
   cap_cfg.pUserData        = &st;
 
@@ -168,8 +174,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // ADR-0004: production num_mics ∈ [2, 8]. The host live harness has only
+  // a single physical mic, so we initialize at num_mics = 2 and duplicate
+  // the mono capture into ch[0] and ch[1]. The Beamformer stub picks ch[0],
+  // so the duplicate channel is a no-op but keeps the chain interface
+  // honest with the production contract.
   ecnr::AecChain chain;
-  if (!chain.Init(ecnr::kSampleRateHz)) {
+  if (!chain.Init(sample_rate_hz, 2)) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
@@ -198,17 +209,28 @@ int main(int argc, char** argv) {
     bool got_pair = false;
     {
       std::lock_guard<std::mutex> lk(st.mu);
-      if (st.capture_ring.Size() >= ecnr::kFrameSamples &&
-          st.render_ring.Size()  >= ecnr::kFrameSamples) {
-        st.render_ring.Read(ref_f.samples.data(), ecnr::kFrameSamples);
-        st.capture_ring.Read(mic_f.samples.data(), ecnr::kFrameSamples);
+      if (static_cast<int>(st.capture_ring.Size()) >= frame_samples &&
+          static_cast<int>(st.render_ring.Size())  >= frame_samples) {
+        // Render is mono.
+        ref_f.n_samples = frame_samples;
+        ref_f.n_channels = 1;
+        st.render_ring.Read(ref_f.ch[0].data(),
+                            static_cast<size_t>(frame_samples));
+        // Mic is 2-channel; read mono into ch[0], then duplicate to ch[1].
+        mic_f.n_samples = frame_samples;
+        mic_f.n_channels = 2;
+        st.capture_ring.Read(mic_f.ch[0].data(),
+                             static_cast<size_t>(frame_samples));
+        std::memcpy(mic_f.ch[1].data(), mic_f.ch[0].data(),
+                    frame_samples * sizeof(int16_t));
         got_pair = true;
       }
     }
     if (got_pair) {
       chain.ProcessRender(ref_f);
       chain.ProcessCapture(mic_f, out_f);
-      processed.insert(processed.end(), out_f.samples.begin(), out_f.samples.end());
+      processed.insert(processed.end(), out_f.ch[0].begin(),
+                       out_f.ch[0].begin() + out_f.n_samples);
       ++frames_processed;
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -238,7 +260,7 @@ int main(int argc, char** argv) {
   ma_device_uninit(&play_dev);
   ma_device_uninit(&cap_dev);
 
-  if (!ecnr::hal::WriteWavMono(args.out, processed, ecnr::kSampleRateHz, &err)) {
+  if (!ecnr::hal::WriteWavMono(args.out, processed, sample_rate_hz, &err)) {
     std::fprintf(stderr, "write out: %s\n", err.c_str());
     return 1;
   }

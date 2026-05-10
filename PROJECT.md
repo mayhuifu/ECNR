@@ -12,14 +12,14 @@ Linear AEC backbone (classical DSP) + neural post-processing for residual echo a
    far-end (RTP / media playback)
         │
         ▼
-   [render tap] ────── reference signal ──┐
-                                          │
-   mic[N] ──► [resample 16k] ──► [linear AEC: WebRTC AEC3] ──► [neural RES] ──► [NS] ──► [AGC] ──► uplink
-                                          ▲                       ▲
-                                          │                       │
-                                  [delay estimator]        [mode controller]
-                                                                  │
-                                          idle / NS-lite / AEC / AEC+NN
+   [render tap] ────────── reference signal ─────────────┐
+                                                         │
+   mic[N=2..8] ──► [resample] ──► [Beamformer N→1] ──► [linear AEC: WebRTC AEC3] ──► [neural RES] ──► [NS] ──► [AGC] ──► uplink
+                                          ▲                     ▲                        ▲
+                                          │                     │                        │
+                                   geometry hint        [delay estimator]         [mode controller]
+                                                                                          │
+                                                          idle / NS-lite / AEC / AEC+NN
 ```
 
 ### Design choices
@@ -46,7 +46,7 @@ The source research is primarily *cellular* (VoLTE/VoNR). The following must be 
 | Phase | Goal | Notes |
 |---|---|---|
 | **0. Bootstrap** | Project doc + vendor manifest + scaffold with **stub** AEC/NS backends + green smoke test on dev host | Done |
-| **0.5 Backend wiring** | Replace stubs with real WebRTC AEC3 + RNNoise behind same `AecChain` interface; tighten ERLE assertion to > 15 dB | Next |
+| **0.5 Backend wiring** | Replace stubs with real WebRTC AEC3 + RNNoise behind same `AecChain` interface; tighten ERLE assertion to > 15 dB. **Task 5.5 (2026-05-10):** rate-aware + channel-aware `Frame` and stub `Beamformer` landed ahead of Tasks 6/7 per ADR-0003 + ADR-0004. | Next |
 | **0.6 Host live E2E** | `ecnr_live` binary using miniaudio: play stimulus through Mac speakers, capture from mac mic, run AecChain live, write recovered output + report measured ERLE. Cross-platform-ready (Mac/Linux/Windows). | Next |
 | 1. Baseline tier on A55 | Cross-compile, productize WebRTC AEC3 + RNNoise, A/B vs reference set | |
 | 2. Cabin characterization | Measure cabin IR; build road/wind/HVAC + double-talk reference corpus | Vehicle access required |
@@ -106,6 +106,9 @@ ECNR/
 - **2026-05-09** — Phase 0 ships **stub** AEC + NS backends behind the `AecChain` interface to unblock the architecture and harness. Real WebRTC AEC3 + RNNoise wiring is its own milestone (Phase 0.5) — defers Meson + autotools build orchestration to a focused effort with visible scaffold progress already on the trunk.
 - **2026-05-09** — Add Phase 0.6 (host live E2E on macOS) using **miniaudio** (single-header, public-domain/MIT, cross-platform). Vendored at `third_party/miniaudio/miniaudio.h`. Picked over PortAudio for zero-dep build and over CoreAudio for cross-platform reach (Linux ALSA / Windows WASAPI come for free).
 - **2026-05-09** — Project published to https://github.com/mayhuifu/ECNR (public).
+- **2026-05-10** — ADR-0003 accepted: two-tier sample rate (16 kHz baseline + 48 kHz fullband); rate set at `AecChain::Init`; both tiers use 10 ms frames.
+- **2026-05-10** — ADR-0004 accepted: 2-8 mics, runtime-configured; new `Beamformer` chain stage upstream of AEC3 (stub passes ch[0] for Phase 0.5; real algorithm gated by ADR-0010).
+- **2026-05-10** — ADR-0005 accepted: render-tap policy (post-DRC/EQ/protection, as close to the speaker driver as the platform allows).
 
 ## Open questions
 

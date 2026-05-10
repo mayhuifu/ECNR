@@ -86,14 +86,19 @@ ctest --test-dir build --output-on-failure
 **Expected:**
 
 ```
-1/3 Test #1: AecChain.InitRejectsWrongSampleRate ...   Passed
-2/3 Test #2: AecChain.AttenuatesCorrelatedEcho .....   Passed
-3/3 Test #3: AecChain.RtfIsMeasured ................   Passed
+1/8 Test #1: AecChain.InitRejectsWrongSampleRate ........................   Passed
+2/8 Test #2: AecChain.InitRejectsWrongMicCount ..........................   Passed
+3/8 Test #3: AecChain.AcceptsBoth16kAnd48k ..............................   Passed
+4/8 Test #4: AecChain.AttenuatesCorrelatedEcho ..........................   Passed
+5/8 Test #5: AecChain.BeamformerStubCollapsesToCh0 ......................   Passed
+6/8 Test #6: AecChain.SetStreamDelayMsAcceptsAndClamps ..................   Passed
+7/8 Test #7: AecChain.EchoReturnLossEnhancementOptionalUnsetUnderStub ...   Passed
+8/8 Test #8: AecChain.RtfIsMeasured .....................................   Passed
 
-100% tests passed, 0 tests failed out of 3
+100% tests passed, 0 tests failed out of 8
 ```
 
-**Proves:** `AecChain` rejects unsupported sample rates, the (Phase 0 stub) AEC actually attenuates correlated echo (cumulative ERLE > 5 dB on 200 noise frames), and the chain measures CPU/audio time correctly (RTF < 1).
+**Proves:** `AecChain` rejects unsupported sample rates and out-of-range mic counts (per ADR-0003 + ADR-0004), accepts both 16 kHz and 48 kHz, the stub Beamformer collapses N-channel input to ch[0], the (Phase 0 stub) AEC actually attenuates correlated echo (cumulative ERLE > 5 dB on 200 noise frames), and the chain measures CPU/audio time correctly (RTF < 1).
 
 > Phase 0.5 will tighten the ERLE assertion to **> 15 dB** once WebRTC AEC3 + RNNoise replace the stubs. If you ever see this test fail with "ERLE > 15 dB", it means the wiring is correct and you've crossed into Phase 0.5 territory.
 
@@ -203,7 +208,7 @@ scripts/fetch-vendor.sh            # everything (~450 MB)
 | `Checking for module 'sndfile' — not found` | libsndfile not installed *or* pkg-config can't find it | `brew install libsndfile` then re-run cmake configure |
 | `ma_device_init(capture) failed (microphone permission?)` | Mac mic permission not granted | System Settings → Privacy & Security → Microphone → enable for your terminal app, restart terminal |
 | Live loopback prints `cap_dropped=NNN` (non-zero) | Processing thread starved, or device buffer larger than ring | Either: build `Release` not `RelWithDebInfo`; or open an issue and share the number for tuning |
-| `stimulus must be 16000 Hz mono` | Stimulus WAV at wrong rate | Regenerate with `gen_synth.py` or resample with `sox in.wav -r 16000 -c 1 out.wav` |
+| `stimulus must be 16000 or 48000 Hz mono` | Stimulus WAV at wrong rate | Regenerate with `gen_synth.py` or resample with `sox in.wav -r 16000 -c 1 out.wav` (or `-r 48000`) |
 | Test 2 (`AttenuatesCorrelatedEcho`) fails after a backend change | You're in Phase 0.5+ — the stub threshold of 5 dB is too lenient. Tighten the assertion to match what the real AEC delivers. | Edit `src/tests/aec_chain_test.cc` |
 
 ---

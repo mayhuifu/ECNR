@@ -58,41 +58,57 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "read ref: %s\n", err.c_str());
     return 1;
   }
-  if (mic_wav.sample_rate_hz != ecnr::kSampleRateHz ||
-      ref_wav.sample_rate_hz != ecnr::kSampleRateHz) {
+  if (!ecnr::IsSupportedSampleRate(mic_wav.sample_rate_hz) ||
+      mic_wav.sample_rate_hz != ref_wav.sample_rate_hz) {
     std::fprintf(stderr,
-                 "Phase 0 expects %d Hz inputs (got mic=%d, ref=%d). "
-                 "Resampling will land in Phase 0.5.\n",
-                 ecnr::kSampleRateHz, mic_wav.sample_rate_hz,
-                 ref_wav.sample_rate_hz);
+                 "ecnr_bench expects 16000 or 48000 Hz mono inputs, both at "
+                 "the same rate (got mic=%d, ref=%d).\n",
+                 mic_wav.sample_rate_hz, ref_wav.sample_rate_hz);
     return 1;
   }
+  const int sample_rate_hz = mic_wav.sample_rate_hz;
+  const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
 
+  // ADR-0004 fixes the production mic-count contract at [2, 8]; this offline
+  // harness has only mono input. We honor the contract by initializing the
+  // chain at num_mics = 2 and duplicating the mono signal into ch[0] and
+  // ch[1]. The Beamformer stub picks ch[0], so the duplicated channel has
+  // no effect on the processed output but keeps the chain interface honest.
   ecnr::AecChain chain;
-  if (!chain.Init(ecnr::kSampleRateHz)) {
+  if (!chain.Init(sample_rate_hz, 2)) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
 
   const size_t total_frames =
       std::min(mic_wav.samples.size(), ref_wav.samples.size()) /
-      ecnr::kFrameSamples;
+      static_cast<size_t>(frame_samples);
   std::vector<int16_t> processed;
-  processed.reserve(total_frames * ecnr::kFrameSamples);
+  processed.reserve(total_frames * frame_samples);
 
   ecnr::Frame mic_f, ref_f, out_f;
   for (size_t i = 0; i < total_frames; ++i) {
-    const size_t off = i * ecnr::kFrameSamples;
-    std::memcpy(ref_f.samples.data(), ref_wav.samples.data() + off,
-                ecnr::kFrameSamples * sizeof(int16_t));
-    std::memcpy(mic_f.samples.data(), mic_wav.samples.data() + off,
-                ecnr::kFrameSamples * sizeof(int16_t));
+    const size_t off = i * frame_samples;
+    // Render is mono.
+    ref_f.n_samples = frame_samples;
+    ref_f.n_channels = 1;
+    std::memcpy(ref_f.ch[0].data(), ref_wav.samples.data() + off,
+                frame_samples * sizeof(int16_t));
+    // Mic is 2-channel; duplicate the mono input into ch[0] and ch[1].
+    mic_f.n_samples = frame_samples;
+    mic_f.n_channels = 2;
+    std::memcpy(mic_f.ch[0].data(), mic_wav.samples.data() + off,
+                frame_samples * sizeof(int16_t));
+    std::memcpy(mic_f.ch[1].data(), mic_wav.samples.data() + off,
+                frame_samples * sizeof(int16_t));
+
     chain.ProcessRender(ref_f);
     chain.ProcessCapture(mic_f, out_f);
-    processed.insert(processed.end(), out_f.samples.begin(), out_f.samples.end());
+    processed.insert(processed.end(), out_f.ch[0].begin(),
+                     out_f.ch[0].begin() + out_f.n_samples);
   }
 
-  if (!ecnr::hal::WriteWavMono(args.out, processed, ecnr::kSampleRateHz, &err)) {
+  if (!ecnr::hal::WriteWavMono(args.out, processed, sample_rate_hz, &err)) {
     std::fprintf(stderr, "write out: %s\n", err.c_str());
     return 1;
   }

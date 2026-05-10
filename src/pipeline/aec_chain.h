@@ -60,17 +60,21 @@ class AecChain {
   AecChain(const AecChain&) = delete;
   AecChain& operator=(const AecChain&) = delete;
 
-  // Sample rate must equal kSampleRateHz for v1 (16 kHz, 10 ms frames).
-  // Returns false if sample_rate_hz is unsupported.
-  bool Init(int sample_rate_hz);
+  // Sample rate must be 16000 or 48000 (see IsSupportedSampleRate); num_mics
+  // must be in [2, kMaxMics] (see IsSupportedMicCount). The chain ingests
+  // per-mic capture frames and emits mono uplink. Per ADR-0003 + ADR-0004.
+  bool Init(int sample_rate_hz, int num_mics);
 
-  // Push a far-end (render / loudspeaker reference) frame. Must precede the
-  // matching capture frame in time. The chain's delay estimator handles
-  // arbitrary mic-vs-render latency at the system boundary.
+  // Push a far-end (render / loudspeaker reference) frame. Render is mono —
+  // n_channels must equal 1, and n_samples must match the configured rate.
+  // Must precede the matching capture frame in time. The chain's delay
+  // estimator handles arbitrary mic-vs-render latency at the system boundary.
   void ProcessRender(const Frame& render);
 
-  // Push a near-end (mic) frame; receive the cleaned frame in `out`.
-  void ProcessCapture(const Frame& capture, Frame& out);
+  // Push a near-end (mic) frame; receive the cleaned mono frame in `out`.
+  // mic_in.n_channels must equal the configured num_mics; uplink_out emerges
+  // mono (n_channels = 1) after Beamformer collapses the multi-mic input.
+  void ProcessCapture(const Frame& mic_in, Frame& uplink_out);
 
   // Drop adapted state — call on stream restart, sample-rate change, or
   // confirmed routing change at the HAL.

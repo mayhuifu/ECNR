@@ -77,6 +77,7 @@ target_include_directories(ecnr_core PUBLIC src)
 # --- ecnr_pipeline (AEC chain) -------------------------------------------------
 add_library(ecnr_pipeline STATIC
   src/pipeline/aec_chain.cc
+  src/pipeline/beamformer.cc
 )
 target_link_libraries(ecnr_pipeline PUBLIC ecnr_core)
 

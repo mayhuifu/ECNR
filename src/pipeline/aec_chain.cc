@@ -1,12 +1,14 @@
 #include "pipeline/aec_chain.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <vector>
 
 #include "core/frame.h"
+#include "pipeline/beamformer.h"
 
 namespace ecnr {
 
@@ -16,6 +18,9 @@ namespace {
 // estimate of the render frame from capture, with a fixed delay-line. NOT a
 // real AEC — present only to exercise the chain plumbing and produce a non-zero
 // ERLE for the smoke test. Phase 0.5 replaces with webrtc::AudioProcessing.
+//
+// Mono-only by design: the Beamformer upstream collapses N→1 before this stub
+// sees the frame, so we always operate on ch[0].
 class StubLinearAec {
  public:
   void ProcessRender(const Frame& render) {
@@ -24,19 +29,24 @@ class StubLinearAec {
     render_history_.push_back(render);
   }
 
-  // out = capture - alpha * (most recent render). Phase 0 only.
+  // out = capture - alpha * (most recent render). Phase 0 only. Operates on
+  // ch[0] only; assumes the caller already collapsed N→1 via Beamformer.
   void ProcessCapture(const Frame& capture, Frame& out) {
+    out.n_channels = 1;
+    out.n_samples = capture.n_samples;
     if (render_history_.empty()) {
-      out = capture;
+      for (int i = 0; i < capture.n_samples; ++i) {
+        out.ch[0][i] = capture.ch[0][i];
+      }
       return;
     }
     const Frame& ref = render_history_.back();
     constexpr double kAlpha = 0.7;
-    for (int i = 0; i < kFrameSamples; ++i) {
+    for (int i = 0; i < capture.n_samples; ++i) {
       const int32_t y =
-          static_cast<int32_t>(capture.samples[i]) -
-          static_cast<int32_t>(std::round(kAlpha * ref.samples[i]));
-      out.samples[i] = static_cast<int16_t>(std::clamp(y, -32768, 32767));
+          static_cast<int32_t>(capture.ch[0][i]) -
+          static_cast<int32_t>(std::round(kAlpha * ref.ch[0][i]));
+      out.ch[0][i] = static_cast<int16_t>(std::clamp(y, -32768, 32767));
     }
   }
 
@@ -56,24 +66,36 @@ class StubNs {
 }  // namespace
 
 struct AecChain::Impl {
+  Beamformer beamformer;
   StubLinearAec aec;
   StubNs ns;
   ChainStats stats;
   int sample_rate_hz = 0;
+  int num_mics = 0;
   int stream_delay_ms = 0;
 };
 
 AecChain::AecChain() : impl_(std::make_unique<Impl>()) {}
 AecChain::~AecChain() = default;
 
-bool AecChain::Init(int sample_rate_hz) {
-  if (sample_rate_hz != kSampleRateHz) return false;
+bool AecChain::Init(int sample_rate_hz, int num_mics) {
+  if (!IsSupportedSampleRate(sample_rate_hz)) return false;
+  if (!IsSupportedMicCount(num_mics)) return false;
+  if (!impl_->beamformer.Init(sample_rate_hz, num_mics)) return false;
   impl_->sample_rate_hz = sample_rate_hz;
+  impl_->num_mics = num_mics;
   Reset();
   return true;
 }
 
 void AecChain::ProcessRender(const Frame& render) {
+  // Render is mono and must match the configured rate. Drop misshaped frames
+  // in non-debug builds; assert in debug.
+  assert(render.n_channels == 1);
+  assert(render.n_samples == FrameSamplesFor(impl_->sample_rate_hz));
+  if (render.n_channels != 1) return;
+  if (render.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) return;
+
   const auto t0 = std::chrono::steady_clock::now();
   impl_->aec.ProcessRender(render);
   const auto t1 = std::chrono::steady_clock::now();
@@ -81,11 +103,26 @@ void AecChain::ProcessRender(const Frame& render) {
       std::chrono::duration<double>(t1 - t0).count();
 }
 
-void AecChain::ProcessCapture(const Frame& capture, Frame& out) {
+void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
+  assert(mic_in.n_channels == impl_->num_mics);
+  assert(mic_in.n_samples == FrameSamplesFor(impl_->sample_rate_hz));
+  if (mic_in.n_channels != impl_->num_mics) return;
+  if (mic_in.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) return;
+
   const auto t0 = std::chrono::steady_clock::now();
 
-  impl_->aec.ProcessCapture(capture, out);
-  impl_->ns.Process(out);
+  Frame post_bf;
+  impl_->beamformer.Process(mic_in, post_bf);
+
+  Frame post_aec;
+  impl_->aec.ProcessCapture(post_bf, post_aec);
+  impl_->ns.Process(post_aec);
+
+  uplink_out.n_channels = 1;
+  uplink_out.n_samples = post_aec.n_samples;
+  for (int i = 0; i < post_aec.n_samples; ++i) {
+    uplink_out.ch[0][i] = post_aec.ch[0][i];
+  }
 
   const auto t1 = std::chrono::steady_clock::now();
   impl_->stats.cpu_time_s +=
@@ -100,6 +137,7 @@ void AecChain::ProcessCapture(const Frame& capture, Frame& out) {
 }
 
 void AecChain::Reset() {
+  impl_->beamformer.Reset();
   impl_->aec.Reset();
   impl_->ns.Reset();
   impl_->stats = {};
