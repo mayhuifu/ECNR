@@ -7,6 +7,7 @@
 #include "core/frame.h"
 #include "hal/file_io.h"
 #include "pipeline/aec_chain.h"
+#include "pipeline/mic_geometry.h"
 
 namespace {
 
@@ -23,12 +24,24 @@ struct Args {
   bool ns_vad_blend_set = false;
   float ns_vad_blend_low = 0.0f;
   float ns_vad_blend_high = 0.0f;
+  // ADR-0010: when true, the chain initialises Beamformer with
+  // kPassthroughGeometry (ch[0]-verbatim fast path) — the right choice
+  // when the mic input is a 1-channel WAV duplicated into ch[0] and ch[1]
+  // (bench's Phase-0.5 default). When false (the new default), DSB is
+  // active and feeding bit-identical channels triggers a one-shot
+  // stderr warning from Beamformer.
+  bool bypass_beamformer = false;
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
                "usage: %s --mic mic.wav --ref ref.wav [--out out.wav]\n"
-               "       [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n",
+               "       [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n"
+               "       [--bypass-beamformer]\n"
+               "\n"
+               "  --bypass-beamformer  use Beamformer passthrough (ch[0] verbatim)\n"
+               "                       instead of DSB. Right for mono input duplicated\n"
+               "                       across channels (no spatial information).\n",
                prog);
 }
 
@@ -60,6 +73,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
                      val.c_str(), e.what());
         return false;
       }
+    } else if (flag == "--bypass-beamformer") {
+      a->bypass_beamformer = true;
     } else if (flag == "-h" || flag == "--help") {
       return false;
     } else {
@@ -101,16 +116,29 @@ int main(int argc, char** argv) {
   const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
 
   // ADR-0004 fixes the production mic-count contract at [2, 8]; this offline
-  // harness has only mono input. We honor the contract by initializing the
-  // chain at num_mics = 2 and duplicating the mono signal into ch[0] and
-  // ch[1]. The Beamformer stub picks ch[0], so the duplicated channel has
-  // no effect on the processed output but keeps the chain interface honest.
-  // TODO(ADR-0010): mono-duplicated 2-channel input is degenerate for any real
-  // beamformer (zero inter-mic delay; perfectly correlated channels — singular
-  // covariance under MVDR). Once the real beamformer lands, this harness should
-  // either accept multi-channel WAV input or add a --bypass-beamformer flag.
+  // harness's mono input is duplicated into ch[0] + ch[1] (a 2-mic shape).
+  // Two paths per ADR-0010:
+  //   - --bypass-beamformer: chain inits with kPassthroughGeometry, picks
+  //     ch[0] verbatim. Right for mono input.
+  //   - default (DSB active): chain inits with a placeholder 2-mic linear
+  //     geometry (4 cm along +x, target +x). For bit-identical channels
+  //     the Beamformer logs a one-shot warning and produces mildly
+  //     attenuated output (sub-sample-delayed average); to silence the
+  //     warning, either pass --bypass-beamformer or supply real multi-
+  //     channel input (lands in a follow-up commit).
   ecnr::AecChain chain;
-  if (!chain.Init(sample_rate_hz, 2)) {
+  bool chain_ok = false;
+  if (args.bypass_beamformer) {
+    chain_ok = chain.Init(sample_rate_hz, 2);
+  } else {
+    ecnr::MicGeometry geom{};
+    geom.positions_m[0] = {-0.02f, 0.0f, 0.0f};
+    geom.positions_m[1] = { 0.02f, 0.0f, 0.0f};
+    geom.target_direction = {1.0f, 0.0f, 0.0f};
+    geom.speed_of_sound_mps = 343.0f;
+    chain_ok = chain.Init(sample_rate_hz, 2, geom);
+  }
+  if (!chain_ok) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
