@@ -429,6 +429,121 @@ Re-running is idempotent — already-present repos at the pinned SHA print `ok` 
 
 ---
 
+## CLI reference
+
+Complete list of every flag both binaries accept. Run with `-h` or `--help` for the same info inline.
+
+### `ecnr_bench` — offline file replay
+
+Replays a `--mic` WAV through the AEC + NS chain using a paired `--ref` WAV as the far-end reference. Writes the processed output and prints a one-line stats summary.
+
+| Flag | Argument | Required | Default | Purpose |
+|---|---|---|---|---|
+| `--mic` | path | yes | — | Mic-capture WAV (16 or 48 kHz mono int16). |
+| `--ref` | path | yes | — | Far-end reference WAV (same rate as `--mic`, mono int16). |
+| `--out` | path | no | `out.wav` | Output WAV for the chain's processed mono uplink. |
+| `--ns-dry-blend` | `<0..1>` | no | `0.0` | **Step A NS cap.** Uniform wet/dry mix on RNNoise's output: `final = α·input + (1−α)·rnnoise_out`. `0.0` = unchanged RNNoise; `0.25` ≈ −12 dB suppression floor; `1.0` = NS bypass. Mitigates chopped-voice artifact on heavy noise. |
+| `--ns-vad-blend` | `<low,high>` | no | unset | **Step B VAD-gated NS cap.** Interpolates α between `low` (noise-dominant frames) and `high` (voice-dominant frames) using RNNoise's per-frame voice probability. e.g. `0.0,0.30` = full NS on pure-noise frames, ~−10 dB cap on voice. Supersedes `--ns-dry-blend` when both are passed. |
+| `-h`, `--help` | — | no | — | Print usage and exit. |
+
+**Stats line printed at exit** (fields shown depend on what flags ran):
+
+```
+frames=<N>  audio=<seconds>  cpu=<seconds>  rtf=<ratio>  erle_db=<dB>  dropped=<frames>
+[ns_dry_blend=<α>]                              # only when --ns-dry-blend > 0
+[ns_vad_blend=<low>..<high>  last_vad=<p>  last_blend=<α>]   # only with --ns-vad-blend
+```
+
+`erle_db` is sourced from `webrtc::AudioProcessingStats::echo_return_loss_enhancement` (an `std::optional<double>`, per ADR-0006). Prints `N/A` only if AEC3 hasn't converged enough to populate it (extremely short stimulus).
+
+**Examples:**
+
+```sh
+# Plain bench — current default NS behaviour.
+./build/ecnr_bench --mic reference/synth/demo_60s_mic.wav \
+                   --ref reference/synth/demo_60s_ref.wav \
+                   --out /tmp/demo_after.wav
+
+# Step A: cap NS suppression at -12 dB.
+./build/ecnr_bench --mic ... --ref ... --out /tmp/step_a.wav --ns-dry-blend 0.25
+
+# Step B: VAD-gated NS — full RNNoise on noise, capped on voice.
+./build/ecnr_bench --mic ... --ref ... --out /tmp/step_b.wav --ns-vad-blend 0.0,0.30
+
+# Parameter sweep on the short 30 s demo.
+for blend in 0.0 0.15 0.25 0.40; do
+  ./build/ecnr_bench --mic reference/synth/demo_30s_mic.wav \
+                     --ref reference/synth/demo_30s_ref.wav \
+                     --out "/tmp/sweep_${blend}.wav" --ns-dry-blend "$blend"
+done
+```
+
+### `ecnr_live` — host live loopback (speakers + mic)
+
+Plays a stimulus through the system speakers, captures live from the default mic, runs the chain in real time. Two modes:
+
+- **Live (default)** — `--stimulus FILE` required. Speakers play it; mic captures; chain processes.
+- **Record-only** — `--record-voice FILE` set. No stimulus playback, no chain. Pure capture-to-WAV.
+
+| Flag | Argument | Required | Default | Purpose |
+|---|---|---|---|---|
+| `--stimulus` | path | live mode | — | WAV played out the speakers (the far-end / render). 16 or 48 kHz mono int16; loops `--inject-noise` if shorter. |
+| `--out` | path | no | `live_out.wav` | Processed AEC + NS output WAV. Incompatible with `--record-voice`. |
+| `--out-raw` | path | no | unset | Raw captured mic stream (post `--inject-noise` mix, pre-AEC). The "before" track for A/B demos. |
+| `--inject-noise` | path | no | unset | WAV mixed into the capture stream **before** AEC sees it (mono int16, same rate as stimulus; loops if shorter). Simulates ambient noise that's not coming from the speaker. AEC has no reference for it; RNNoise does the work. |
+| `--inject-gain-db` | float | no | `-12.0` | Gain applied to injected noise (dB) before mixing. |
+| `--ns-dry-blend` | `<0..1>` | no | `0.0` | Step A NS cap. See `ecnr_bench` table for semantics. |
+| `--ns-vad-blend` | `<low,high>` | no | unset | Step B VAD-gated NS cap. Supersedes `--ns-dry-blend` when both passed. |
+| `--duration` | float (s) | no | stimulus duration; `15.0` in `--record-voice` mode | Cap session length. Useful for short auditions and for `--record-voice`. |
+| `--record-voice` | path | no | unset | **Record-only mode.** Capture from default mic for `--duration` seconds and write a 16 kHz mono WAV. No stimulus playback, no AEC chain. Incompatible with `--out` and `--inject-noise`. Used to record near-end / caller voice WAVs for the deterministic harness (Step E.2 / E.3). |
+| `-h`, `--help` | — | no | — | Print usage and exit. |
+
+**Stats line printed at exit:**
+
+```
+frames=<N>  audio=<seconds>  rtf=<ratio>  erle_db=<dB>  cap_dropped=<N>  ref_dropped=<N>  chain_dropped=<N>
+[ns_dry_blend=<α>]  or  [ns_vad_blend=<low>..<high>  last_vad=<p>  last_blend=<α>]
+```
+
+`cap_dropped` / `ref_dropped` should both be 0 — non-zero means the processing thread starved or a ring buffer overflowed (thread scheduling or device buffer issue). `chain_dropped` is the chain's own shape-mismatch counter; non-zero indicates a HAL / harness bug.
+
+**Examples:**
+
+```sh
+# Headline demo: 60 s walkthrough with caller + scene noises through speakers.
+./build/ecnr_live --stimulus reference/synth/demo_60s_speaker_mix.wav \
+                  --out /tmp/live_after.wav \
+                  --out-raw /tmp/live_before.wav
+
+# Short variant (30 s; easier to A/B).
+./build/ecnr_live --stimulus reference/synth/demo_30s_speaker_mix.wav \
+                  --out /tmp/live_30s_after.wav \
+                  --out-raw /tmp/live_30s_before.wav
+
+# Step B VAD-gated NS during the live demo.
+./build/ecnr_live --stimulus reference/synth/demo_60s_speaker_mix.wav \
+                  --ns-vad-blend 0.0,0.30 \
+                  --out /tmp/live_step_b.wav
+
+# Inject-noise mode: speaker plays only the caller; noise is software-mixed
+# into the captured mic (chain has no reference for it, NS does the work).
+./build/ecnr_live --stimulus reference/synth/demo_60s_ref.wav \
+                  --inject-noise reference/synth/demo_60s_noise.wav \
+                  --out /tmp/live_inject.wav --out-raw /tmp/live_inject_raw.wav
+
+# Record-only: capture 60 s of your voice for the caller slot in the canned demo.
+./build/ecnr_live --record-voice reference/synth/caller_recorded.wav --duration 60
+```
+
+**Mode interactions:**
+
+- `--stimulus` + `--inject-noise`: speakers play stimulus, mic mix includes injected noise. Two independent paths AEC must reckon with separately (speaker echo via reference, injected noise via NS only).
+- `--stimulus` of a combined file (e.g. `demo_60s_speaker_mix.wav`): speakers play caller + noise together; AEC reference covers both; AEC cancels their composite echo as one signal. Different test condition from `--inject-noise`.
+- `--record-voice`: live mode, but no chain. Mutually exclusive with `--out` and `--inject-noise` (and any chain-output flag).
+- `--ns-dry-blend` and `--ns-vad-blend` both passed: `--ns-vad-blend` wins; Step B is a strict superset of Step A (uniform blend is the `low == high` case).
+
+---
+
 ## Common failures & fixes
 
 | Symptom | Likely cause | Fix |
