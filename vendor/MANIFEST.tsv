@@ -1,0 +1,11 @@
+# Vendored open-source dependencies — pinned by upstream URL + commit SHA.
+# Format (TSV): name<TAB>url<TAB>commit<TAB>tier<TAB>required
+# Re-fetch with: ./scripts/fetch-vendor.sh
+# Captured: 2026-05-09
+webrtc-audio-processing	https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing.git	d0569cfa50c1858ee279d77b3fc8870be6902441	baseline	required
+rnnoise	https://github.com/xiph/rnnoise.git	70f1d256acd4b34a572f999a05c87bf00b67730d	baseline	required
+speexdsp	https://github.com/xiph/speexdsp.git	7a158783df74efe7c2d1c6ee8363c1e695c71226	baseline	required
+deepfilternet	https://github.com/Rikorose/DeepFilterNet.git	d375b2d8309e0935d165700c91da9de862a99c31	research	optional
+dtln-aec	https://github.com/breizhn/DTLN-aec.git	9d24e128b4f409db18227b8babb343016625921f	research	optional
+nkf-aec	https://github.com/fjiang9/NKF-AEC.git	8ac58fb8fb9ced48579f9aa310745c54f98d7e1f	research	optional
+athena-signal	https://github.com/athena-team/athena-signal.git	fdf89deaa507c819378a1837053f529b9c35145e	research	optional

@@ -1,0 +1,52 @@
+# Build outputs
+build/
+build-*/
+out/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Vendored open-source code is fetched by scripts/fetch-vendor.sh (pinned in vendor/MANIFEST.tsv)
+# We track the manifest + docs but not the source — keeps repo small and provenance reproducible.
+vendor/*/
+!vendor/MANIFEST.tsv
+!vendor/README.md
+
+# Editor / OS / LSP
+.DS_Store
+.idea/
+.vscode/
+.cache/
+compile_commands.json
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated test audio (regenerate locally; don't commit large WAVs)
+reference/synth/
+*.wav
+!reference/README.md
+!reference/**/*.md
+
+# Models — large binaries; commit pointers, not weights
+models/*.tflite
+models/*.onnx
+models/*.pb
+models/*.bin
+
+# Coverage / profiling
+*.gcda
+*.gcno
+*.profraw
+coverage/
+
+# CTest
+Testing/
