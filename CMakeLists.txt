@@ -77,9 +77,13 @@ target_include_directories(ecnr_core PUBLIC src)
 # --- ecnr_pipeline (AEC chain) -------------------------------------------------
 add_library(ecnr_pipeline STATIC
   src/pipeline/aec_chain.cc
+  src/pipeline/aec3_adapter.cc
   src/pipeline/beamformer.cc
 )
 target_link_libraries(ecnr_pipeline PUBLIC ecnr_core)
+# webrtc::apm is an implementation detail — only aec3_adapter.cc references
+# webrtc:: types. Keep PRIVATE so the public AecChain header stays clean.
+target_link_libraries(ecnr_pipeline PRIVATE webrtc::apm)
 
 # --- ecnr_hal (file I/O via libsndfile) ----------------------------------------
 add_library(ecnr_hal STATIC

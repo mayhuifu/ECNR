@@ -75,8 +75,8 @@ TEST(AecChain, AcceptsBoth16kAnd48k) {
 // expect the chain to attenuate the capture energy. The Beamformer collapses
 // the multi-mic capture to mono (ch[0]), so we drive both mics with the same
 // echoed signal — what AEC sees post-beamform is unchanged from the previous
-// single-channel test. Phase 0 stub uses a simple alpha-subtraction so we
-// only assert that *some* attenuation happens; Phase 0.5 will tighten this.
+// single-channel test. Real WebRTC AEC3 should reduce echo cumulative ERLE
+// substantially; threshold here is conservative to avoid CI flakiness.
 TEST(AecChain, AttenuatesCorrelatedEcho) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 2));
@@ -86,15 +86,13 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   zero_near.n_samples = FrameSamplesFor(16000);
   zero_near.n_channels = 1;
   Frame far, mic_mono, mic, out;
-  // Echo gain != stub alpha (0.7) so the stub leaves a measurable residual
-  // rather than perfectly cancelling.
   constexpr double kEchoGain = 0.5;
 
-  // Run 200 frames (2 seconds). Stub AEC needs a frame of warmup before the
-  // delay line is populated, so check ERLE on later frames only.
+  // Run 300 frames (3 seconds). AEC3 needs ~1-2 seconds to converge; we
+  // measure ERLE on frames 100+ (last 2 seconds).
   double cumulative_in_e = 0.0;
   double cumulative_out_e = 0.0;
-  for (int i = 0; i < 200; ++i) {
+  for (int i = 0; i < 300; ++i) {
     // Render is mono.
     FillNoise(far, rng, 16000, 1);
     // Build the mono echoed mic, then duplicate into a 2-channel mic frame.
@@ -107,7 +105,7 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
     }
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
-    if (i >= 50) {
+    if (i >= 100) {
       for (int j = 0; j < FrameSamplesFor(16000); ++j) {
         const double xin = static_cast<double>(mic.ch[0][j]) / 32768.0;
         const double xout = static_cast<double>(out.ch[0][j]) / 32768.0;
@@ -120,18 +118,19 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   ASSERT_GT(cumulative_in_e, 0.0);
   ASSERT_GT(cumulative_out_e, 0.0);
   const double erle_db = 10.0 * std::log10(cumulative_in_e / cumulative_out_e);
-  // Stub AEC threshold: at least 5 dB. Phase 0.5 will raise to 15 dB once
-  // AEC3 + RNNoise replace the stub.
-  EXPECT_GT(erle_db, 5.0) << "Phase 0 stub AEC failed to attenuate echo";
+  // Conservative threshold to avoid CI flakiness; Task 8 tightens to > 15 dB
+  // once we're confident the wiring is solid.
+  EXPECT_GT(erle_db, 5.0) << "AEC3 failed to attenuate echo (erle_db=" << erle_db << ")";
 }
 
-TEST(AecChain, BeamformerStubCollapsesToCh0) {
+TEST(AecChain, BeamformerCollapsesToMono) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 4));
   std::mt19937 rng(0xb44b);
 
-  // Construct a 4-mic capture with distinct content per channel; only ch[0]
-  // should propagate through the stub beamformer.
+  // Construct a 4-mic capture with distinct content per channel; the chain
+  // must collapse to mono regardless of how many input channels the mic
+  // frame carries.
   Frame mic, render, out;
   mic.n_samples = FrameSamplesFor(16000);
   mic.n_channels = 4;
@@ -146,13 +145,12 @@ TEST(AecChain, BeamformerStubCollapsesToCh0) {
   c.ProcessRender(render);
   c.ProcessCapture(mic, out);
 
-  ASSERT_EQ(out.n_channels, 1);
-  ASSERT_EQ(out.n_samples, FrameSamplesFor(16000));
-  // Stub AEC subtracts render * alpha; render is silence, so out should
-  // equal beamformer output, which equals mic.ch[0]. Spot-check a few samples.
-  for (int s = 0; s < 10; ++s) {
-    EXPECT_EQ(out.ch[0][s], mic.ch[0][s]) << "stub beamformer should pass ch[0] through; sample " << s;
-  }
+  // Beamformer collapse contract: chain emits exactly one channel at the
+  // configured frame size. (We can't spot-check exact sample equality any
+  // more — AEC3's HPF + internal 10 ms block buffering modifies the signal
+  // even when render is silent.)
+  EXPECT_EQ(out.n_channels, 1);
+  EXPECT_EQ(out.n_samples, FrameSamplesFor(16000));
 }
 
 TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
@@ -172,25 +170,24 @@ TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
   c.SetStreamDelayMs(5000);           // clamps down
 }
 
-TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {
+TEST(AecChain, ChainStatsPopulatedAfterAec3Convergence) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 2));
   std::mt19937 rng(0x1111);
   Frame far, mic, out;
-  for (int i = 0; i < 10; ++i) {
+  for (int i = 0; i < 200; ++i) {  // 2 s — gives APM time to populate stats
     FillNoise(far, rng, 16000, 1);
     FillNoise(mic, rng, 16000, 2);
     c.ProcessRender(far);
     c.ProcessCapture(mic, out);
   }
-  // Stub backend does not surface APM stats; all optional fields are nullopt.
-  EXPECT_FALSE(c.Stats().echo_return_loss_enhancement_db.has_value());
-  EXPECT_FALSE(c.Stats().echo_return_loss_db.has_value());
-  EXPECT_FALSE(c.Stats().residual_echo_likelihood.has_value());
-  EXPECT_FALSE(c.Stats().residual_echo_likelihood_recent_max.has_value());
-  EXPECT_FALSE(c.Stats().delay_ms.has_value());
-  EXPECT_FALSE(c.Stats().delay_median_ms.has_value());
-  EXPECT_FALSE(c.Stats().divergent_filter_fraction.has_value());
+  // At least one optional should be populated by APM after 2 seconds.
+  const auto& s = c.Stats();
+  EXPECT_TRUE(
+    s.echo_return_loss_enhancement_db.has_value() ||
+    s.residual_echo_likelihood.has_value() ||
+    s.delay_ms.has_value()
+  ) << "no APM stats populated after 2 seconds — check Aec3Adapter wiring";
 }
 
 TEST(AecChain, RejectsMisshapedFrame) {

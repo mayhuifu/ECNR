@@ -3,61 +3,19 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <vector>
 
 #include "core/frame.h"
+#include "pipeline/aec3_adapter.h"
 #include "pipeline/beamformer.h"
 
 namespace ecnr {
 
 namespace {
 
-// Phase 0 stub: a primitive linear AEC that subtracts an exponentially-smoothed
-// estimate of the render frame from capture, with a fixed delay-line. NOT a
-// real AEC — present only to exercise the chain plumbing and produce a non-zero
-// ERLE for the smoke test. Phase 0.5 replaces with webrtc::AudioProcessing.
-//
-// Mono-only by design: the Beamformer upstream collapses N→1 before this stub
-// sees the frame, so we always operate on ch[0].
-class StubLinearAec {
- public:
-  void ProcessRender(const Frame& render) {
-    // Push to a 16-frame delay line so capture sees correlated history.
-    if (render_history_.size() >= 16) render_history_.erase(render_history_.begin());
-    render_history_.push_back(render);
-  }
-
-  // out = capture - alpha * (most recent render). Phase 0 only. Operates on
-  // ch[0] only; assumes the caller already collapsed N→1 via Beamformer.
-  void ProcessCapture(const Frame& capture, Frame& out) {
-    out.n_channels = 1;
-    out.n_samples = capture.n_samples;
-    if (render_history_.empty()) {
-      for (int i = 0; i < capture.n_samples; ++i) {
-        out.ch[0][i] = capture.ch[0][i];
-      }
-      return;
-    }
-    const Frame& ref = render_history_.back();
-    constexpr double kAlpha = 0.7;
-    for (int i = 0; i < capture.n_samples; ++i) {
-      const int32_t y =
-          static_cast<int32_t>(capture.ch[0][i]) -
-          static_cast<int32_t>(std::round(kAlpha * ref.ch[0][i]));
-      out.ch[0][i] = static_cast<int16_t>(std::clamp(y, -32768, 32767));
-    }
-  }
-
-  void Reset() { render_history_.clear(); }
-
- private:
-  std::vector<Frame> render_history_;
-};
-
-// Phase 0 stub NS: noop pass-through. Phase 0.5 replaces with rnnoise_process_frame.
+// Phase 0 stub NS: noop pass-through. Phase 0.5 Task 7 replaces with
+// rnnoise_process_frame. Left in place by Task 6 (AEC3 wiring only).
 class StubNs {
  public:
   void Process(Frame& f) { (void)f; }
@@ -68,7 +26,7 @@ class StubNs {
 
 struct AecChain::Impl {
   Beamformer beamformer;
-  StubLinearAec aec;
+  Aec3Adapter aec3;
   StubNs ns;
   ChainStats stats;
   int sample_rate_hz = 0;
@@ -83,6 +41,7 @@ bool AecChain::Init(int sample_rate_hz, int num_mics) {
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
   if (!IsSupportedMicCount(num_mics)) return false;
   if (!impl_->beamformer.Init(sample_rate_hz, num_mics)) return false;
+  if (!impl_->aec3.Init(sample_rate_hz)) return false;
   impl_->sample_rate_hz = sample_rate_hz;
   impl_->num_mics = num_mics;
   Reset();
@@ -105,7 +64,7 @@ void AecChain::ProcessRender(const Frame& render) {
   }
 
   const auto t0 = std::chrono::steady_clock::now();
-  impl_->aec.ProcessRender(render);
+  impl_->aec3.ProcessRender(render);
   const auto t1 = std::chrono::steady_clock::now();
   impl_->stats.cpu_time_s +=
       std::chrono::duration<double>(t1 - t0).count();
@@ -126,11 +85,15 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
 
   const auto t0 = std::chrono::steady_clock::now();
 
+  // Forward the latest stream-delay seed before processing so AEC3's delay
+  // estimator has the freshest hint for this capture frame.
+  impl_->aec3.SetStreamDelayMs(impl_->stream_delay_ms);
+
   Frame post_bf;
   impl_->beamformer.Process(mic_in, post_bf);
 
   Frame post_aec;
-  impl_->aec.ProcessCapture(post_bf, post_aec);
+  impl_->aec3.ProcessCapture(post_bf, post_aec);
   impl_->ns.Process(post_aec);
 
   uplink_out.n_channels = 1;
@@ -145,15 +108,22 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
   impl_->stats.audio_time_s +=
       static_cast<double>(kFrameDurationMs) / 1000.0;
 
-  // Per ADR-0006: APM-style stats (ERLE, ERL, residual-echo likelihood, ...)
-  // are populated by the WebRTC backend wired in Task 6. Under the stub,
-  // all optional fields stay nullopt — a manually-computed energy ratio
-  // here would be misleading and is intentionally not surfaced.
+  // Pull APM-internal stats and copy field-for-field into ChainStats. Per
+  // ADR-0006, ChainStats's optional fields mirror webrtc::AudioProcessingStats.
+  // APM populates these gradually (delay metrics aggregate over ~1 s windows).
+  const Aec3Adapter::Stats a = impl_->aec3.GetStats();
+  impl_->stats.echo_return_loss_enhancement_db     = a.echo_return_loss_enhancement_db;
+  impl_->stats.echo_return_loss_db                 = a.echo_return_loss_db;
+  impl_->stats.residual_echo_likelihood            = a.residual_echo_likelihood;
+  impl_->stats.residual_echo_likelihood_recent_max = a.residual_echo_likelihood_recent_max;
+  impl_->stats.delay_ms                            = a.delay_ms;
+  impl_->stats.delay_median_ms                     = a.delay_median_ms;
+  impl_->stats.divergent_filter_fraction           = a.divergent_filter_fraction;
 }
 
 void AecChain::Reset() {
   impl_->beamformer.Reset();
-  impl_->aec.Reset();
+  impl_->aec3.Reset();
   impl_->ns.Reset();
   impl_->stats = {};
 }
