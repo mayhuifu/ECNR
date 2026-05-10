@@ -240,5 +240,52 @@ TEST(AecChain, RtfIsMeasured) {
   EXPECT_LT(s.Rtf(), 1.0) << "stub chain should be far faster than realtime";
 }
 
+// Smoke: pure noise input + silent render. The chain should produce
+// attenuated output at both 16k and 48k tiers (RNNoise reduces noise floor
+// even with no echo). The threshold is loose because RNNoise's behavior on
+// pure white noise is "suppress confidently" — typically 5-15 dB of energy
+// reduction.
+TEST(AecChain, NsActiveAtBothRates) {
+  for (int rate : {16000, 48000}) {
+    AecChain c;
+    ASSERT_TRUE(c.Init(rate, 2)) << "init at " << rate;
+    std::mt19937 rng(0xb0b);
+    Frame far, mic, out;
+    far.n_channels = 1;
+    far.n_samples = FrameSamplesFor(rate);
+    mic.n_channels = 2;
+    mic.n_samples = FrameSamplesFor(rate);
+
+    double total_in_e = 0.0, total_out_e = 0.0;
+    for (int i = 0; i < 200; ++i) {  // 2 seconds
+      // Render is silent (no echo).
+      for (int s = 0; s < far.n_samples; ++s) far.ch[0][s] = 0;
+      // Mic is white noise on both channels.
+      std::uniform_int_distribution<int> dist(-2000, 2000);
+      for (int s = 0; s < mic.n_samples; ++s) {
+        const int16_t v = static_cast<int16_t>(dist(rng));
+        mic.ch[0][s] = v;
+        mic.ch[1][s] = v;
+      }
+      c.ProcessRender(far);
+      c.ProcessCapture(mic, out);
+      if (i >= 50) {  // skip warm-up
+        for (int s = 0; s < mic.n_samples; ++s) {
+          const double xin = mic.ch[0][s] / 32768.0;
+          const double xout = out.ch[0][s] / 32768.0;
+          total_in_e += xin * xin;
+          total_out_e += xout * xout;
+        }
+      }
+    }
+    ASSERT_GT(total_in_e, 0.0);
+    // Loose: out_e should be < 90% of in_e at both rates. RNNoise typically
+    // achieves much more, but on synthetic uniform noise the response is
+    // less predictable than on speech.
+    EXPECT_LT(total_out_e, total_in_e * 0.9)
+        << "rate=" << rate << " in_e=" << total_in_e << " out_e=" << total_out_e;
+  }
+}
+
 }  // namespace
 }  // namespace ecnr

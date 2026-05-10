@@ -9,25 +9,14 @@
 #include "core/frame.h"
 #include "pipeline/aec3_adapter.h"
 #include "pipeline/beamformer.h"
+#include "pipeline/rnnoise_adapter.h"
 
 namespace ecnr {
-
-namespace {
-
-// Phase 0 stub NS: noop pass-through. Phase 0.5 Task 7 replaces with
-// rnnoise_process_frame. Left in place by Task 6 (AEC3 wiring only).
-class StubNs {
- public:
-  void Process(Frame& f) { (void)f; }
-  void Reset() {}
-};
-
-}  // namespace
 
 struct AecChain::Impl {
   Beamformer beamformer;
   Aec3Adapter aec3;
-  StubNs ns;
+  RnNsAdapter ns;
   ChainStats stats;
   int sample_rate_hz = 0;
   int num_mics = 0;
@@ -42,6 +31,7 @@ bool AecChain::Init(int sample_rate_hz, int num_mics) {
   if (!IsSupportedMicCount(num_mics)) return false;
   if (!impl_->beamformer.Init(sample_rate_hz, num_mics)) return false;
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
+  if (!impl_->ns.Init(sample_rate_hz)) return false;
   impl_->sample_rate_hz = sample_rate_hz;
   impl_->num_mics = num_mics;
   Reset();

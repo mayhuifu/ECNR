@@ -136,12 +136,12 @@ This produces three 10-second 16 kHz mono WAVs:
 **Expected (numbers vary by machine; ERLE typically 12–20 dB on this synthetic stimulus):**
 
 ```
-frames=1000  audio=10.000s  cpu=0.14s  rtf=0.014  erle_db=16.68  dropped=0
+frames=1000  audio=10.000s  cpu=0.57s  rtf=0.057  erle_db=16.68  dropped=0
 ```
 
 **How to read it:**
 - `frames=1000` and `audio=10.000s` → the harness consumed all 10 s of the input pair correctly.
-- `rtf` ≪ 1.0 → the chain is faster than realtime; on an M-class laptop expect roughly 0.01–0.05 with AEC3 wired.
+- `rtf` ≪ 1.0 → the chain is faster than realtime; on an M-class laptop expect roughly 0.04–0.10 with AEC3 + RNNoise wired (16k tier adds Speex 16↔48 kHz resampling around RNNoise).
 - `erle_db` is `webrtc::AudioProcessingStats::echo_return_loss_enhancement` surfaced through `ChainStats::echo_return_loss_enhancement_db` (an `std::optional<double>`, per ADR-0006). With real AEC3 wired (Task 6) it populates after a brief warm-up; the bench prints `N/A` only if the optional is still unset (e.g., the stimulus was so short AEC3 didn't have time to converge). On the synthetic mic/ref pair above, expect a value in the 12–20 dB range.
 - `dropped=0` — non-zero means a HAL/harness bug fed the chain a frame with wrong rate/channels/samples; should always be zero in healthy runs.
 

@@ -26,6 +26,9 @@ include(FetchContent)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 
+# --- speexdsp (for RNNoise's 16<->48 kHz resampling at 16k tier) ----------------
+pkg_check_modules(SPEEXDSP REQUIRED IMPORTED_TARGET speexdsp)
+
 # --- webrtc-audio-processing (vendored, built via Meson + ExternalProject) -----
 # Produces the imported target `webrtc::apm`. Downstream code (Phase 0.5
 # Task 6) will link against this; nothing in the pipeline uses it yet.
@@ -79,11 +82,13 @@ add_library(ecnr_pipeline STATIC
   src/pipeline/aec_chain.cc
   src/pipeline/aec3_adapter.cc
   src/pipeline/beamformer.cc
+  src/pipeline/rnnoise_adapter.cc
 )
 target_link_libraries(ecnr_pipeline PUBLIC ecnr_core)
-# webrtc::apm is an implementation detail — only aec3_adapter.cc references
-# webrtc:: types. Keep PRIVATE so the public AecChain header stays clean.
-target_link_libraries(ecnr_pipeline PRIVATE webrtc::apm)
+# webrtc::apm + ecnr_rnnoise + speexdsp are implementation details — only the
+# *_adapter.cc files reference those types. Keep PRIVATE so the public
+# AecChain header stays clean.
+target_link_libraries(ecnr_pipeline PRIVATE webrtc::apm ecnr_rnnoise PkgConfig::SPEEXDSP)
 
 # --- ecnr_hal (file I/O via libsndfile) ----------------------------------------
 add_library(ecnr_hal STATIC
