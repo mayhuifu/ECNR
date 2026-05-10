@@ -264,6 +264,62 @@ afplay /tmp/aec_after.wav
 
 - Troubleshooting: if `_before.wav` is silent, mic permission isn't actually granted (System Settings → Privacy & Security → Microphone — restart the terminal after enabling). If `_after.wav` is silent but `_before.wav` has content, the chain over-cancelled (rare; investigate the run's `erle_db` and `chain_dropped` numbers).
 
+### Step E.2 — Deterministic A/B test (no human required)
+
+Step E.1 is great for a quick listen but it depends on a human speaking into the mic each time, which makes parameter sweeps painful and direct numerical comparisons unreliable (different takes, different room state, different volume). Step E.2 closes that gap with a fully deterministic harness: the **same input every run**, so any difference in the bench output is attributable to the chain's parameters, not the speaker or the room.
+
+The harness has three pieces:
+
+1. **A clean voice signal**, either recorded once via `ecnr_live --record-voice` (your real voice) or generated synthetically by `gen_synth.py` (`voice_synth.wav`).
+2. **A simulated speaker echo**, produced by `gen_test_input.py` convolving the same `ref.wav` stimulus we already use elsewhere with a short room IR.
+3. **Optional noise**, mixed in by `gen_test_input.py` at a chosen dB level (matching the gain semantics of `--inject-gain-db`).
+
+The output is a single mic WAV that `ecnr_bench` can process against `ref.wav`.
+
+```sh
+# One-time: record your own voice (or skip this and use voice_synth.wav).
+./build/ecnr_live --record-voice reference/synth/voice_recorded.wav --duration 15
+# Speak naturally for 15 seconds. No stimulus plays — pure capture.
+
+# Generate a test mic WAV combining voice + simulated echo + road noise.
+python3 reference/gen_test_input.py \
+    --noise reference/synth/noise_road.wav \
+    --noise-gain-db -9 \
+    --out reference/synth/test_mic_road.wav
+
+# Run AEC on it.
+./build/ecnr_bench \
+    --mic reference/synth/test_mic_road.wav \
+    --ref reference/synth/ref.wav \
+    --out /tmp/test_after_road.wav
+
+# A/B compare.
+afplay reference/synth/test_mic_road.wav   # before
+afplay /tmp/test_after_road.wav             # after
+```
+
+The default voice for `gen_test_input.py` is `reference/synth/voice_recorded.wav` if it exists, otherwise `reference/synth/voice_synth.wav`. So once you record once, every subsequent test uses your real voice automatically — no flag changes needed.
+
+**Parameter sweep example** (helpful for characterizing how the chain behaves as the noise floor changes — exactly the kind of thing the user observed when RNNoise over-suppressed under heavy synthetic noise):
+
+```sh
+for gain in -18 -12 -9 -6 -3; do
+  python3 reference/gen_test_input.py \
+    --noise reference/synth/noise_road.wav \
+    --noise-gain-db "$gain" \
+    --out "reference/synth/test_mic_road_${gain}.wav"
+  ./build/ecnr_bench \
+    --mic "reference/synth/test_mic_road_${gain}.wav" \
+    --ref reference/synth/ref.wav \
+    --out "/tmp/test_after_road_${gain}.wav"
+  echo "noise_gain=${gain} dB -> /tmp/test_after_road_${gain}.wav"
+done
+```
+
+**Why this matters:** this is the harness Phase 2 (cabin characterization) and Phase 3 (neural RES selection per ADR-0007) will both build on. Real cabin recordings replace `voice_synth.wav` and `ref.wav`; everything else stays the same. Deterministic inputs make it possible to compare two model variants — or two AEC3 configurations — side by side without arguing about whether one of the takes was just louder.
+
+**Proves:** end-to-end AEC + NS characterization can run reproducibly without a human in the loop, unblocking parameter sweeps and Phase 3 model selection.
+
 ### Step F — Re-fetch vendor (optional, slow)
 
 ```sh

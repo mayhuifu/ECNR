@@ -44,36 +44,48 @@ struct Args {
   std::string inject_noise;   // optional: WAV mixed into capture stream before AEC
   double inject_gain_db = -12.0;  // gain applied to injected noise before mixing
   double duration_s = 0.0;    // 0 = play stimulus to completion
+  // Record-only mode: no stimulus playback, no AEC; capture from default mic and
+  // dump to the given WAV. Used to record a clean near-end voice signal for
+  // gen_test_input.py (the deterministic A/B harness — see Step E.2 in README).
+  std::string record_voice;
+  bool out_explicit = false;  // true if --out was passed (vs. taken from default)
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
       "usage: %s --stimulus stim.wav [--out live_out.wav] [--out-raw raw.wav]\n"
       "       [--inject-noise noise.wav] [--inject-gain-db DB] [--duration SECONDS]\n"
+      "       %s --record-voice out.wav [--duration SECONDS]\n"
       "\n"
-      "  --stimulus FILE       (required) WAV played out the speakers (far-end / render)\n"
+      "  --stimulus FILE       (required for live mode) WAV played out the speakers (far-end / render)\n"
       "  --out FILE            processed AEC+NS output (default: live_out.wav)\n"
       "  --out-raw FILE        raw captured mic stream (post noise-injection, pre-AEC)\n"
       "                        — the 'before' track for A/B demos\n"
       "  --inject-noise FILE   WAV mixed into the capture stream before AEC sees it\n"
       "                        (must match stimulus rate, mono int16; loops if shorter)\n"
       "  --inject-gain-db DB   gain applied to injected noise (default: -12.0)\n"
-      "  --duration SECONDS    cap session length (default: stimulus duration)\n",
-      prog);
+      "  --duration SECONDS    cap session length (default: stimulus duration; or 15 s in --record-voice mode)\n"
+      "  --record-voice FILE   record-only mode: capture from the default mic for --duration seconds\n"
+      "                        (default 15 s) and write a 16 kHz mono WAV. No stimulus playback,\n"
+      "                        no AEC chain. Incompatible with --out and --inject-noise.\n",
+      prog, prog);
 }
 
 bool ParseArgs(int argc, char** argv, Args* a) {
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
     if (flag == "--stimulus" && i + 1 < argc) a->stimulus = argv[++i];
-    else if (flag == "--out" && i + 1 < argc) a->out = argv[++i];
+    else if (flag == "--out" && i + 1 < argc) { a->out = argv[++i]; a->out_explicit = true; }
     else if (flag == "--out-raw" && i + 1 < argc) a->out_raw = argv[++i];
     else if (flag == "--inject-noise" && i + 1 < argc) a->inject_noise = argv[++i];
     else if (flag == "--inject-gain-db" && i + 1 < argc) a->inject_gain_db = std::stod(argv[++i]);
     else if (flag == "--duration" && i + 1 < argc) a->duration_s = std::stod(argv[++i]);
+    else if (flag == "--record-voice" && i + 1 < argc) a->record_voice = argv[++i];
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
   }
+  // In record-voice mode, --stimulus is not required. In live mode, it is.
+  if (!a->record_voice.empty()) return true;
   return !a->stimulus.empty();
 }
 
@@ -198,6 +210,105 @@ int main(int argc, char** argv) {
   }
 
   std::string err;
+
+  // --- Record-voice mode (no stimulus, no AEC, no playback). ---
+  // This branches early because the rest of main() assumes a stimulus and an
+  // AEC chain. Record mode is a much simpler capture-only loop that writes the
+  // raw mic stream to a 16 kHz mono WAV — used for the deterministic A/B
+  // harness (Step E.2 in README).
+  if (!args.record_voice.empty()) {
+    if (args.out_explicit) {
+      std::fprintf(stderr,
+                   "--record-voice is incompatible with --out (no AEC chain to produce output)\n");
+      return 2;
+    }
+    if (!args.inject_noise.empty()) {
+      std::fprintf(stderr,
+                   "--record-voice is incompatible with --inject-noise (no AEC chain to inject into)\n");
+      return 2;
+    }
+
+    constexpr int kRecordSampleRate = 16000;
+    const double duration_s = args.duration_s > 0.0 ? args.duration_s : 15.0;
+
+    LiveState st;
+    g_stop_flag = &st.stop;
+    std::signal(SIGINT, HandleSigint);
+    std::signal(SIGTERM, HandleSigint);
+
+    ma_device_config cap_cfg = ma_device_config_init(ma_device_type_capture);
+    cap_cfg.capture.format   = ma_format_s16;
+    cap_cfg.capture.channels = 1;
+    cap_cfg.sampleRate       = static_cast<ma_uint32>(kRecordSampleRate);
+    cap_cfg.dataCallback     = CaptureCallback;
+    cap_cfg.pUserData        = &st;
+
+    ma_device cap_dev;
+    if (ma_device_init(nullptr, &cap_cfg, &cap_dev) != MA_SUCCESS) {
+      std::fprintf(stderr, "ma_device_init(capture) failed (microphone permission?)\n");
+      return 1;
+    }
+    if (ma_device_start(&cap_dev) != MA_SUCCESS) {
+      std::fprintf(stderr, "ma_device_start(capture) failed\n");
+      ma_device_uninit(&cap_dev);
+      return 1;
+    }
+
+    std::printf("ecnr_live: record-voice mode — capturing %.1f s from default mic to %s. "
+                "speak now (ctrl-c to stop early).\n",
+                duration_s, args.record_voice.c_str());
+
+    // Drain the capture ring into an accumulator, no AEC chain. Same loop
+    // shape as the live path so SIGINT and --duration semantics match exactly.
+    std::vector<int16_t> recorded;
+    const size_t expected = static_cast<size_t>(duration_s * kRecordSampleRate);
+    recorded.reserve(expected);
+
+    const auto t_start = std::chrono::steady_clock::now();
+    std::vector<int16_t> scratch(1024);
+    while (!st.stop.load()) {
+      size_t got = 0;
+      {
+        std::lock_guard<std::mutex> lk(st.mu);
+        got = st.capture_ring.Read(scratch.data(), scratch.size());
+      }
+      if (got > 0) {
+        recorded.insert(recorded.end(), scratch.begin(), scratch.begin() + got);
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+
+      const auto now = std::chrono::steady_clock::now();
+      const double elapsed = std::chrono::duration<double>(now - t_start).count();
+      if (elapsed >= duration_s) break;
+    }
+
+    ma_device_stop(&cap_dev);
+    ma_device_uninit(&cap_dev);
+
+    // Final drain of anything still queued in the ring after the device stops.
+    {
+      std::lock_guard<std::mutex> lk(st.mu);
+      while (st.capture_ring.Size() > 0) {
+        const size_t got = st.capture_ring.Read(scratch.data(), scratch.size());
+        if (got == 0) break;
+        recorded.insert(recorded.end(), scratch.begin(), scratch.begin() + got);
+      }
+    }
+
+    if (!ecnr::hal::WriteWavMono(args.record_voice, recorded, kRecordSampleRate, &err)) {
+      std::fprintf(stderr, "write record-voice: %s\n", err.c_str());
+      return 1;
+    }
+
+    const double recorded_s =
+        static_cast<double>(recorded.size()) / kRecordSampleRate;
+    std::printf("record-voice mode: wrote %zu samples (%.2f s) to %s; cap_dropped=%llu\n",
+                recorded.size(), recorded_s, args.record_voice.c_str(),
+                static_cast<unsigned long long>(st.capture_dropped.load()));
+    return 0;
+  }
+
   ecnr::hal::WavData stim;
   if (!ecnr::hal::ReadWavMono(args.stimulus, &stim, &err)) {
     std::fprintf(stderr, "read stimulus: %s\n", err.c_str());
