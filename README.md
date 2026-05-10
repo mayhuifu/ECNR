@@ -336,6 +336,30 @@ scripts/fetch-noise.sh
 
 Re-running is idempotent: present files at the pinned SHA256 print `ok` and do nothing. License audit summary is in [`reference/noise/README.md`](reference/noise/README.md).
 
+**Optional but strongly recommended — record your own voices.** The synthetic `voice_synth.wav` and `ref_voice.wav` sound abstract; replacing one or both with a real recording makes AEC's "the caller is gone" moment immediately recognizable.
+
+```sh
+# Record yourself as the caller (the voice AEC should remove).
+# Speak as if you were on the other end of a call — say something distinctive
+# like "Hi, this is [name] calling, how are you?". Looped to fill 60 s if shorter.
+./build/ecnr_live --record-voice reference/synth/caller_recorded.wav --duration 60
+
+# Optionally also record yourself as the near-end (the voice AEC should preserve).
+# Say something different so you can tell the two voices apart in the demo.
+./build/ecnr_live --record-voice reference/synth/voice_recorded.wav --duration 60
+```
+
+The composer auto-prefers `caller_recorded.wav` and `voice_recorded.wav` when present, falling back to the synthetic versions when not. The print-timeline output shows which is in use:
+
+```sh
+python3 reference/gen_combined_demo.py --print-timeline
+# ✓ near_voice     real     reference/synth/voice_recorded.wav   ← your recording
+# ✓ ref_voice      real     reference/synth/caller_recorded.wav  ← your recording
+# (or)
+# ~ near_voice     fallback reference/synth/voice_synth.wav      ← synthetic
+# ~ ref_voice      fallback reference/synth/ref_voice.wav        ← synthetic
+```
+
 Compose the demo:
 
 ```sh

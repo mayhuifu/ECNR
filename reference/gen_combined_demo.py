@@ -52,13 +52,20 @@ N_TOTAL = int(DURATION_S * SR)
 # if neither is present (with a clear log line).
 SOURCES = {
     "near_voice": {
-        "path": "reference/synth/voice_synth.wav",
-        "fallback": None,  # required — no synthetic fallback
+        # Prefer a real recording (./build/ecnr_live --record-voice
+        # reference/synth/voice_recorded.wav --duration 60) — the synthetic
+        # voice_synth.wav is the fallback when no recording exists.
+        "path": "reference/synth/voice_recorded.wav",
+        "fallback": "reference/synth/voice_synth.wav",
         "purpose": "near-end speech (the user, looped throughout)",
     },
     "ref_voice": {
-        "path": "reference/synth/ref_voice.wav",
-        "fallback": None,  # required
+        # Prefer a real recording (./build/ecnr_live --record-voice
+        # reference/synth/caller_recorded.wav --duration 60) — the synthetic
+        # ref_voice.wav is the fallback. Without a real recording the caller
+        # voice can sound abstract, making AEC's removal harder to perceive.
+        "path": "reference/synth/caller_recorded.wav",
+        "fallback": "reference/synth/ref_voice.wav",
         "purpose": "far-end stimulus (caller voice through speaker, looped throughout)",
     },
     "cabin_ir": {
