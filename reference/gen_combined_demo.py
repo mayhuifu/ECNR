@@ -400,12 +400,24 @@ def main() -> int:
     echo_full = np.convolve(ref_full, cabin_ir)[:N_TOTAL] * ECHO_GAIN
 
     mic = near_gain * near_full + direct_full + echo_full
-    # Parallel buffer with ONLY the per-scene noise overlays — no near-end
-    # voice, no caller voice, no cabin echo. This is what `ecnr_live --inject-
-    # noise demo_60s_noise.wav` feeds in for the live test (the user speaks
-    # the near-end voice in real time; the speakers play the caller voice
-    # which AEC adapts to as before; this file supplies the scene noises).
-    noise_only = np.zeros(N_TOTAL, dtype=np.float64)
+    # Parallel buffers used by the two live-test paths:
+    #
+    #   noise_only_raw  — per-scene noise overlays at their native scene gains.
+    #                     Summed with ref_full to produce demo_60s_speaker_mix.wav,
+    #                     which `ecnr_live --stimulus demo_60s_speaker_mix.wav`
+    #                     plays through the speakers. The AEC reference is the
+    #                     same combined stream, so AEC adapts to and cancels
+    #                     BOTH the caller voice echo AND the scene-noise echo
+    #                     coming from the speakers — realistic for "noisy
+    #                     head-unit playback during a call."
+    #
+    #   noise_only_boosted (noise_only_raw + 6 dB, peak-capped) — same content
+    #                     but louder, for the `--inject-noise` path where the
+    #                     noise is software-mixed into the mic stream rather
+    #                     than played through the speakers. The boost makes it
+    #                     audible over live voice + speaker echo without the
+    #                     user having to crank --inject-gain-db.
+    noise_only_raw = np.zeros(N_TOTAL, dtype=np.float64)
 
     # 3. Per-scene noise overlays
     print("# applying scenes:")
@@ -440,7 +452,7 @@ def main() -> int:
         gain_lin = 10.0 ** (gain_db / 20.0)
         contribution = gain_lin * clip_faded
         mic[start_n:start_n + scene_n] += contribution
-        noise_only[start_n:start_n + scene_n] += contribution
+        noise_only_raw[start_n:start_n + scene_n] += contribution
 
         kind_tag = "real" if kind == "real" else "synth"
         print(f"  apply   {start_s:5.1f}–{start_s + dur_s:5.1f}s  {name:<16}  "
@@ -455,20 +467,30 @@ def main() -> int:
         mic *= scale
         print(f"# headroom adjust: peak was {peak:.3f}, scaled by {scale:.3f}")
 
-    # The noise-only buffer is small (each scene normalized to -20 dBFS, gain
-    # applied is -3 to -14 dB); but bump it +6 dB so the noise is clearly
-    # audible in the live test on top of speaker echo and live voice. Cap
-    # peak at -1 dBFS for safety.
+    # demo_60s_noise.wav — boosted version of noise_only_raw for the
+    # `ecnr_live --inject-noise` path (software-mixed into the captured mic).
     NOISE_ONLY_BOOST_DB = 6.0
-    noise_only *= 10.0 ** (NOISE_ONLY_BOOST_DB / 20.0)
-    n_peak = float(np.max(np.abs(noise_only)))
+    noise_only_boosted = noise_only_raw * (10.0 ** (NOISE_ONLY_BOOST_DB / 20.0))
+    n_peak = float(np.max(np.abs(noise_only_boosted)))
     if n_peak > 0.89:  # leave 1 dB headroom
-        noise_only *= 0.89 / n_peak
+        noise_only_boosted *= 0.89 / n_peak
+
+    # demo_60s_speaker_mix.wav — caller voice + scene noises summed at their
+    # native scene gains. `ecnr_live --stimulus demo_60s_speaker_mix.wav` plays
+    # this through the speakers. Since `ecnr_live` uses the stimulus as the
+    # AEC reference, AEC has full knowledge of everything the speaker is
+    # playing and adapts to cancel both caller echo and noise echo as one
+    # composite signal. The user's live mic voice is what survives.
+    speaker_mix = ref_full + noise_only_raw
+    sm_peak = float(np.max(np.abs(speaker_mix)))
+    if sm_peak > 0.99:
+        speaker_mix *= 0.99 / sm_peak
 
     write_wav_mono_16k(out_dir / "demo_60s_mic.wav", mic)
-    write_wav_mono_16k(out_dir / "demo_60s_noise.wav", noise_only)
+    write_wav_mono_16k(out_dir / "demo_60s_noise.wav", noise_only_boosted)
+    write_wav_mono_16k(out_dir / "demo_60s_speaker_mix.wav", speaker_mix)
     print()
-    print(f"wrote {out_dir}/demo_60s_ref.wav + demo_60s_mic.wav + demo_60s_noise.wav  "
+    print(f"wrote {out_dir}/demo_60s_{{ref,mic,noise,speaker_mix}}.wav  "
           f"({DURATION_S:.0f}s @ {SR // 1000} kHz mono)")
     print()
     print("next: ./build/ecnr_bench \\")
