@@ -53,11 +53,15 @@ N_TOTAL = int(DURATION_S * SR)
 SOURCES = {
     "near_voice": {
         # Prefer a real recording (./build/ecnr_live --record-voice
-        # reference/synth/voice_recorded.wav --duration 60) — the synthetic
-        # voice_synth.wav is the fallback when no recording exists.
+        # reference/synth/voice_recorded.wav --duration 60). The fallback is
+        # cafe_babble.wav — a real café/restaurant ambience that gives the
+        # demo a "calling from a noisy environment" character. The synthetic
+        # voice_synth.wav was the previous fallback but sounded robotic
+        # enough to distract from the AEC/NS behaviour the demo exists to
+        # showcase.
         "path": "reference/synth/voice_recorded.wav",
-        "fallback": "reference/synth/voice_synth.wav",
-        "purpose": "near-end speech (the user, looped throughout)",
+        "fallback": "reference/noise/cafe_babble.wav",
+        "purpose": "near-end speech / environment (looped throughout)",
     },
     "ref_voice": {
         # Prefer a real recording (./build/ecnr_live --record-voice
@@ -350,7 +354,11 @@ def main() -> int:
         # the active RMS to target. The user should re-record with higher mic
         # input gain.
         TYPICAL_PEAK_DBFS = -6.0
-        if pk_in < TYPICAL_PEAK_DBFS - 3.0 and src_path.name != "voice_synth.wav" and src_path.name != "ref_voice.wav":
+        # Only warn for user-supplied recordings; synthetic and ambient
+        # sources have intentionally varying levels (cafe babble's peak
+        # depends on the loudest moment in the recording, not on whether
+        # the user "spoke loudly enough").
+        if pk_in < TYPICAL_PEAK_DBFS - 3.0 and src_path.name.endswith("_recorded.wav"):
             print(f"#   warning: {src_path.name} has peak {pk_in:+.1f} dBFS, much "
                   f"below typical speech ({TYPICAL_PEAK_DBFS:+.0f} dBFS). The "
                   f"composer is peak-bound at {VOICE_PEAK_CEILING_DBFS:+.0f} dBFS "
