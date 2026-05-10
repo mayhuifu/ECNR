@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "core/frame.h"
+#include "pipeline/mic_geometry.h"
 
 namespace ecnr {
 
@@ -78,7 +79,18 @@ class AecChain {
   // Sample rate must be 16000 or 48000 (see IsSupportedSampleRate); num_mics
   // must be in [2, kMaxMics] (see IsSupportedMicCount). The chain ingests
   // per-mic capture frames and emits mono uplink. Per ADR-0003 + ADR-0004.
+  // Forwards to the three-arg form with kPassthroughGeometry — i.e., the
+  // Beamformer takes the ch[0]-verbatim fast path. Use this for HAL bring-
+  // up and any caller that doesn't yet have a mic geometry.
   bool Init(int sample_rate_hz, int num_mics);
+
+  // Geometry-aware init per ADR-0010. Forwards `geometry` to Beamformer's
+  // three-arg Init; non-passthrough geometries activate the DSB path.
+  // Same rate/num_mics contract as the two-arg form. Returns false if
+  // any underlying stage rejects (see Beamformer::Init for the geometry
+  // failure modes — zero direction vector, duplicate mic coordinates,
+  // out-of-range rate or num_mics).
+  bool Init(int sample_rate_hz, int num_mics, const MicGeometry& geometry);
 
   // Push a far-end (render / loudspeaker reference) frame. Render is mono —
   // n_channels must equal 1, and n_samples must match the configured rate.

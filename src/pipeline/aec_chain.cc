@@ -26,9 +26,14 @@ AecChain::AecChain() : impl_(std::make_unique<Impl>()) {}
 AecChain::~AecChain() = default;
 
 bool AecChain::Init(int sample_rate_hz, int num_mics) {
+  return Init(sample_rate_hz, num_mics, kPassthroughGeometry);
+}
+
+bool AecChain::Init(int sample_rate_hz, int num_mics,
+                    const MicGeometry& geometry) {
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
   if (!IsSupportedMicCount(num_mics)) return false;
-  if (!impl_->beamformer.Init(sample_rate_hz, num_mics)) return false;
+  if (!impl_->beamformer.Init(sample_rate_hz, num_mics, geometry)) return false;
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
   if (!impl_->ns.Init(sample_rate_hz)) return false;
   impl_->sample_rate_hz = sample_rate_hz;

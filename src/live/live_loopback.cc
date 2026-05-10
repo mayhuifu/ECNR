@@ -34,6 +34,7 @@
 #include "core/ring_buffer.h"
 #include "hal/file_io.h"
 #include "pipeline/aec_chain.h"
+#include "pipeline/mic_geometry.h"
 
 namespace {
 
@@ -55,6 +56,13 @@ struct Args {
   // gen_test_input.py (the deterministic A/B harness — see Step E.2 in README).
   std::string record_voice;
   bool out_explicit = false;  // true if --out was passed (vs. taken from default)
+  // ADR-0010: live captures from a single physical mic and duplicates the
+  // mono stream into ch[0]/ch[1]. Default is bypass = true (chain inits
+  // with kPassthroughGeometry → ch[0] verbatim), matching Phase-0.5
+  // behaviour. Pass --no-bypass-beamformer to flip on DSB; useful for
+  // smoke-testing the DSB path against a synthetic identical-channel
+  // input (the bit-identical warning will fire).
+  bool bypass_beamformer = true;
 };
 
 void PrintUsage(const char* prog) {
@@ -80,7 +88,12 @@ void PrintUsage(const char* prog) {
       "  --duration SECONDS    cap session length (default: stimulus duration; or 15 s in --record-voice mode)\n"
       "  --record-voice FILE   record-only mode: capture from the default mic for --duration seconds\n"
       "                        (default 15 s) and write a 16 kHz mono WAV. No stimulus playback,\n"
-      "                        no AEC chain. Incompatible with --out and --inject-noise.\n",
+      "                        no AEC chain. Incompatible with --out and --inject-noise.\n"
+      "  --bypass-beamformer   force passthrough (default; ch[0] verbatim — right for host loopback\n"
+      "                        with a single physical mic).\n"
+      "  --no-bypass-beamformer  flip DSB on. Useful for smoke-testing the DSB path; will trigger\n"
+      "                        the one-shot bit-identical-channel warning since live duplicates\n"
+      "                        mono capture across ch[0] and ch[1].\n",
       prog, prog);
 }
 
@@ -114,6 +127,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     }
     else if (flag == "--duration" && i + 1 < argc) a->duration_s = std::stod(argv[++i]);
     else if (flag == "--record-voice" && i + 1 < argc) a->record_voice = argv[++i];
+    else if (flag == "--bypass-beamformer") a->bypass_beamformer = true;
+    else if (flag == "--no-bypass-beamformer") a->bypass_beamformer = false;
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
   }
@@ -429,16 +444,26 @@ int main(int argc, char** argv) {
   }
 
   // ADR-0004: production num_mics ∈ [2, 8]. The host live harness has only
-  // a single physical mic, so we initialize at num_mics = 2 and duplicate
-  // the mono capture into ch[0] and ch[1]. The Beamformer stub picks ch[0],
-  // so the duplicate channel is a no-op but keeps the chain interface
-  // honest with the production contract.
-  // TODO(ADR-0010): mono-duplicated 2-channel input is degenerate for any real
-  // beamformer (zero inter-mic delay; perfectly correlated channels — singular
-  // covariance under MVDR). Once the real beamformer lands, this harness should
-  // either accept multi-channel WAV input or add a --bypass-beamformer flag.
+  // a single physical mic, so we initialise at num_mics = 2 and duplicate
+  // the mono capture into ch[0] and ch[1]. Per ADR-0010 the default is
+  // bypass = true so the Beamformer takes the passthrough fast path
+  // (ch[0] verbatim) — identical to Phase-0.5 behaviour. The --no-bypass-
+  // beamformer flag flips on DSB for smoke-testing; it will trigger the
+  // one-shot bit-identical warning because both channels carry the same
+  // mono capture.
   ecnr::AecChain chain;
-  if (!chain.Init(sample_rate_hz, 2)) {
+  bool chain_ok = false;
+  if (args.bypass_beamformer) {
+    chain_ok = chain.Init(sample_rate_hz, 2);
+  } else {
+    ecnr::MicGeometry geom{};
+    geom.positions_m[0] = {-0.02f, 0.0f, 0.0f};
+    geom.positions_m[1] = { 0.02f, 0.0f, 0.0f};
+    geom.target_direction = {1.0f, 0.0f, 0.0f};
+    geom.speed_of_sound_mps = 343.0f;
+    chain_ok = chain.Init(sample_rate_hz, 2, geom);
+  }
+  if (!chain_ok) {
     std::fprintf(stderr, "chain init failed\n");
     return 1;
   }
