@@ -46,7 +46,7 @@ The source research is primarily *cellular* (VoLTE/VoNR). The following must be 
 | Phase | Goal | Notes |
 |---|---|---|
 | **0. Bootstrap** | Project doc + vendor manifest + scaffold with **stub** AEC/NS backends + green smoke test on dev host | Done |
-| **0.5 Backend wiring** | Replace stubs with real WebRTC AEC3 + RNNoise behind same `AecChain` interface; tighten ERLE assertion to > 15 dB. **Task 5.5 (2026-05-10):** rate-aware + channel-aware `Frame` and stub `Beamformer` landed ahead of Tasks 6/7 per ADR-0003 + ADR-0004. | Next |
+| **0.5 Backend wiring** | Real WebRTC AEC3 + RNNoise wired behind the existing `AecChain` interface; multi-rate (16/48 kHz) and 2–8 mic support via a stub `Beamformer` (per ADR-0003 + ADR-0004); ERLE assertion tightened to > 15 dB on the synthetic correlated-echo test (measured ~64 dB at 16 k / ~62 dB at 48 k); RTF ~0.06 on macOS Apple Silicon. | Done |
 | **0.6 Host live E2E** | `ecnr_live` binary using miniaudio: play stimulus through Mac speakers, capture from mac mic, run AecChain live, write recovered output + report measured ERLE. Cross-platform-ready (Mac/Linux/Windows). | Next |
 | 1. Baseline tier on A55 | Cross-compile, productize WebRTC AEC3 + RNNoise, A/B vs reference set | |
 | 2. Cabin characterization | Measure cabin IR; build road/wind/HVAC + double-talk reference corpus | Vehicle access required |
@@ -109,6 +109,14 @@ ECNR/
 - **2026-05-10** — ADR-0003 accepted: two-tier sample rate (16 kHz baseline + 48 kHz fullband); rate set at `AecChain::Init`; both tiers use 10 ms frames.
 - **2026-05-10** — ADR-0004 accepted: 2-8 mics, runtime-configured; new `Beamformer` chain stage upstream of AEC3 (stub passes ch[0] for Phase 0.5; real algorithm gated by ADR-0010).
 - **2026-05-10** — ADR-0005 accepted: render-tap policy (post-DRC/EQ/protection, as close to the speaker driver as the platform allows).
+- **2026-05-10** — Phase 0.5 Stage 0 ADRs locked: ADR-0003 (two-tier 16/48 kHz), ADR-0004 (2–8 mic dynamic config with stub Beamformer in Phase 0.5; real beamforming gated on ADR-0010), ADR-0005 (render tap post-software-DRC/EQ, pre-hardware-amp), ADR-0006 (`AecChain` interface alignment with WebRTC APM — `std::optional<double>` for stats, opaque pimpl boundary for vendor types).
+- **2026-05-10** — `Frame` refactored to rate-aware (`n_samples`) + channel-aware (`n_channels`, `ch[kMaxMics][kFrameSamples48k]`). Per-frame storage 7.7 KB, stack-allocatable, no audio-thread allocations. Active subrange semantics documented in `core/frame.h`.
+- **2026-05-10** — WebRTC AEC3 wired via `Aec3Adapter` (opaque pimpl; no `webrtc::` types appear in any public header). The vendored `webrtc-audio-processing` is built via Meson `ExternalProject` with a macOS CoreFoundation framework workaround for the upstream's missing link in `examples/run-offline`.
+- **2026-05-10** — RNNoise wired via `RnNsAdapter` (opaque pimpl). Inline-built from upstream `RNNOISE_SOURCES` (10 explicit `.c` files, NOT a wildcard glob — globbing would have pulled in training tools). The 16 kHz tier resamples via SpeexDSP `speex_resampler_process_int` (quality 5) around RNNoise's native 48 kHz / 480-sample frames.
+- **2026-05-10** — Stub `Beamformer` lives at `src/pipeline/beamformer.h` and selects `ch[0]` verbatim. Real beamforming (delay-and-sum / MVDR / GSC) deferred to ADR-0010 + Phase 1.
+- **2026-05-10** — `frames_dropped` field on `ChainStats` surfaces shape-mismatch rejections instead of silent no-ops. Bench/live binaries print the counter; non-zero indicates a HAL/harness bug.
+- **2026-05-10** — Test threshold for cumulative ERLE tightened to > 15 dB (real AEC3 measures ~64 dB at 16 kHz / ~62 dB at 48 kHz on the synthetic correlated-echo stimulus). RTF measured ~0.057 on macOS Apple Silicon.
+- **2026-05-10** — Phase 0.5 closed out (Task 10): real WebRTC AEC3 + RNNoise + multi-rate + multi-mic Frame + > 15 dB ERLE thresholds all landed; 18/18 tests green; only the user's interactive listening test for `ecnr_live` remains as a manual verification step.
 
 ## Open questions
 

@@ -6,7 +6,7 @@ See [PROJECT.md](PROJECT.md) for the architecture, roadmap, and dependency list.
 
 ## Status
 
-Phase 0 (bootstrap) **done**: scaffold + dev-host smoke test green. Phase 0.6 (host live E2E loopback via miniaudio) **done**. Phase 0.5 (real backends behind `AecChain`) is **feature-complete**: WebRTC AEC3 wired (Task 6), RNNoise NS wired with Speex 16↔48 kHz resampling (Task 7), and integration tests tightened to require ERLE > 15 dB on the synthetic stimulus (Task 8). Only Task 10 (closeout) remains. The host live loopback (`ecnr_live`) builds and runs but has not yet been validated by an interactive listening test on this machine — see Step E below. Not yet cross-compiled for A55. Not yet vehicle-validated.
+Phase 0 (bootstrap) **done**: scaffold + dev-host smoke test green. Phase 0.6 (host live E2E loopback via miniaudio) **done**. Phase 0.5 (real WebRTC AEC3 + RNNoise + multi-rate + multi-mic `Frame` + tightened ERLE thresholds) **done**: WebRTC AEC3 wired (Task 6), RNNoise NS wired with Speex 16↔48 kHz resampling (Task 7), and integration tests tightened to require ERLE > 15 dB on the synthetic stimulus (Task 8) — measured ~64 dB at 16 k / ~62 dB at 48 k, RTF ~0.06 on macOS Apple Silicon. The host live loopback (`ecnr_live`) builds and runs but still requires the user's interactive listening test on real hardware — see Step E below. Not yet cross-compiled for A55. Not yet vehicle-validated.
 
 Vendored open-source dependencies are not in git — fetch on demand:
 
