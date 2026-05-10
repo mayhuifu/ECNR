@@ -28,7 +28,7 @@ Phase 0.5 ships a *baseline* AEC chain only: AEC3 enabled, NS off (RNNoise lives
 | `Initialize()` (l. 508) | `AecChain::Reset()` re-uses it. | APM's contract: `Initialize()` resets internal state while keeping config. Maps 1:1 onto our `Reset()` semantic ("drop adapted state"). |
 | `ProcessReverseStream(int16_t*, StreamConfig, ...)` (l. 571) | `AecChain::ProcessRender(const Frame&)`. | Same call ordering (render before matching capture). `Frame` is mono int16 today; we feed APM via the int16 interleaved overload because it matches our buffer format and avoids an int16->float conversion in the hot path. |
 | `ProcessStream(int16_t*, ...)` (l. 551) | `AecChain::ProcessCapture(const Frame&, Frame& out)`. | Same as above for capture. APM permits in-place (`src == dest`); we keep the two-buffer signature so the `out` Frame can carry post-AEC stats and so callers can reason about lifetimes. |
-| `set_stream_delay_ms(int)` (l. 620) | **NEW: `AecChain::SetRenderCaptureDelayMs(int)`.** | A6 flagged this as the most likely missing hook. AEC3 needs a coarse render→capture delay seed; if the HAL knows it (e.g. ALSA reports playback+capture latency) we propagate it. If we don't know it, we don't call it — APM's adaptive delay estimator handles the rest. Our wrapper accepts a value, clamps to `[0, 500]` ms, and forwards. |
+| `set_stream_delay_ms(int)` (l. 620) | **NEW: `AecChain::SetStreamDelayMs(int)`.** | A6 flagged this as the most likely missing hook. AEC3 needs a coarse render→capture delay seed; if the HAL knows it (e.g. ALSA reports playback+capture latency) we propagate it. If we don't know it, we don't call it — APM's adaptive delay estimator handles the rest. Our wrapper accepts a value, clamps to `[0, 500]` ms, and forwards. Name chosen for parity with the underlying APM method `set_stream_delay_ms` (so a future reader searching the codebase for the WebRTC name finds our wrapper) and for consistency with ADR-0001 assumption A6 and the Phase 0.5 plan. |
 | `GetStatistics()` → `AudioProcessingStats` (l. 672, statistics header l. 23) | **EXTEND `ChainStats`** with: `residual_echo_likelihood`, `residual_echo_likelihood_recent_max`, `delay_median_ms`, `delay_ms`, `echo_return_loss_db`, `divergent_filter_fraction`. Existing `erle_db` becomes the surfaced `echo_return_loss_enhancement` (already 10·log₁₀ as we defined it). | These are the proof points for the Phase-0.5 test thresholds (the plan calls out `residual_echo_likelihood` specifically). All exposed as `std::optional<...>` to mirror APM's contract that "not yet computed" is distinct from "zero". |
 | `GetConfig()` (l. 681) | *(deferred — internal debug only)* — not on public surface for Phase 0.5. | We own the config; round-tripping it through the public API invites callers to fiddle with AEC3 internals. Reserved for an internal `AecChain::Impl` debug accessor. |
 
@@ -80,10 +80,12 @@ struct ChainStats {
   }
 
   // ---- Linear AEC quality (from APM GetStatistics) ----
-  // 10*log10(P_capture / P_residual). Higher = more echo removed.
-  // Renamed from Phase-0 'erle_db' for parity with APM field name.
+  // ERLE = 10*log10(P_echo / P_out). Mirrors webrtc::AudioProcessingStats
+  // ::echo_return_loss_enhancement (see audio_processing_statistics.h).
+  // Renamed from Phase-0 'erle_db' for parity with the APM field name.
   std::optional<double> echo_return_loss_enhancement_db;
-  // 10*log10(P_far / P_echo). Acoustic property of the room+speaker, not the AEC.
+  // ERL = 10*log10(P_far / P_echo). Acoustic property of the room+speaker,
+  // not the AEC. Mirrors webrtc::AudioProcessingStats::echo_return_loss.
   std::optional<double> echo_return_loss_db;
   // Fraction of the last 1 s window that AEC's adaptive filter was divergent.
   // Health signal; persistent > 0 means the AEC is unhappy (delay/clock drift).
@@ -127,7 +129,7 @@ class AecChain {
   // No-op if Init() has not been called. Safe to call between frames; do not
   // call concurrently with ProcessCapture.
   // Acceptable range: [0, 500] ms; values outside are clamped.
-  void SetRenderCaptureDelayMs(int delay_ms);
+  void SetStreamDelayMs(int delay_ms);
 
   // Drop adapted state. Call on stream restart, sample-rate change, or
   // confirmed routing change at the HAL. Maps to APM Initialize().
@@ -147,13 +149,13 @@ Notes on the sketch:
 
 1. The Phase-0 single `erle_db` field is **renamed** to `echo_return_loss_enhancement_db` and made `optional`. This is a breaking change to `ChainStats`. Phase 0.5 has one in-tree consumer (the harness/test that reports RTF and ERLE); Task 2 updates it in the same commit. No external API stability is owed at this stage of the project.
 2. `Frame` stays mono int16 in v1. The ADR does not prejudge ADR-0003 (canonical sample rate) or ADR-0004 (multi-mic) — when those land, `Frame` widens and the wrapper switches to APM's float overload, but the *public* `AecChain` signatures above remain stable except for the channel count carried inside `Frame`.
-3. `SetRenderCaptureDelayMs` is the only genuinely new public method. Everything else is rename / add-stat. This is the smallest expansion that covers A6 and unblocks the test threshold work in the rest of Phase 0.5.
+3. `SetStreamDelayMs` is the only genuinely new public method. Everything else is rename / add-stat. This is the smallest expansion that covers A6 and unblocks the test threshold work in the rest of Phase 0.5. The name mirrors APM's `set_stream_delay_ms` verbatim.
 
 ## Consequences
 
 **What becomes easier:**
 - The Phase-0.5 test threshold ("residual echo likelihood < X after Y seconds") has a defined surface to read from — Task 5 of the plan can write its assertion against `Stats().residual_echo_likelihood_recent_max` without touching `webrtc::`.
-- The render-tap delay story (ADR-0005) has an obvious propagation path: HAL exposes a delay → `SetRenderCaptureDelayMs(d)` → APM. No re-plumbing needed when Phase 1 wires the real HAL.
+- The render-tap delay story (ADR-0005) has an obvious propagation path: HAL exposes a delay → `SetStreamDelayMs(d)` → APM. No re-plumbing needed when Phase 1 wires the real HAL.
 - New APM stats (e.g. `delay_median_ms`) added by future libwebrtc versions slot into `ChainStats` without touching the rest of the pipeline.
 
 **What becomes harder:**
@@ -171,7 +173,7 @@ Notes on the sketch:
 
 - [ ] **Task 2 (Phase 0.5):** implement `aec_chain.h` to match the sketch above; update `ChainStats` and the single in-tree consumer; the implementation file (`aec_chain.cc`) holds the `webrtc::AudioProcessing` instance behind `Impl` and contains every `webrtc::` reference in the project.
 - [ ] **Task 5 (Phase 0.5):** test threshold reads `Stats().residual_echo_likelihood_recent_max` and `Stats().echo_return_loss_enhancement_db`.
-- [ ] When ADR-0005 (render-tap policy) lands, document where `SetRenderCaptureDelayMs` is called from (HAL adapter? a `DelayProvider` interface?).
+- [ ] When ADR-0005 (render-tap policy) lands, document where `SetStreamDelayMs` is called from (HAL adapter? a `DelayProvider` interface?).
 - [ ] Close out ADR-0001 assumption A6 with a pointer to this ADR.
 
 ## References
