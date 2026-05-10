@@ -1,11 +1,8 @@
 #pragma once
 
-#include "core/frame.h"
+#include <memory>
 
-// Forward-declare RNNoise + Speex types so callers don't pull in those headers.
-struct DenoiseState;          // RNNoise's opaque state (typedef'd to DenoiseState in rnnoise.h)
-struct SpeexResamplerState_;  // SpeexDSP forward decl (the leading underscore matches the typedef pattern)
-typedef struct SpeexResamplerState_ SpeexResamplerState;
+#include "core/frame.h"
 
 namespace ecnr {
 
@@ -16,6 +13,10 @@ namespace ecnr {
 //
 // Per ADR-0003 + ADR-0006, RNNoise replaces the Phase-0 StubNs as the noise
 // suppressor in AecChain.
+//
+// All third-party types (RNNoise's DenoiseState, SpeexDSP's
+// SpeexResamplerState) stay in the .cc inside the opaque Impl pimpl; callers
+// see only ecnr:: types.
 class RnNsAdapter {
  public:
   RnNsAdapter();
@@ -38,10 +39,8 @@ class RnNsAdapter {
   void Process(Frame& f);
 
  private:
-  DenoiseState* st_ = nullptr;          // RNNoise state
-  SpeexResamplerState* up_ = nullptr;   // 16k -> 48k (only at 16k tier)
-  SpeexResamplerState* down_ = nullptr; // 48k -> 16k (only at 16k tier)
-  int sample_rate_hz_ = 0;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace ecnr

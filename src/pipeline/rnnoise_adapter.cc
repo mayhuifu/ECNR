@@ -15,65 +15,76 @@ constexpr int kRnnoiseFrameSamples = 480;  // 48 kHz / 100 Hz
 constexpr int kSpeexQuality = 5;
 }  // namespace
 
-RnNsAdapter::RnNsAdapter() = default;
+// Opaque Impl: holds all third-party state. Custom destructor frees the
+// RNNoise context and the two SpeexDSP resamplers; std::unique_ptr<Impl> in
+// RnNsAdapter then auto-cleans on outer destruction.
+struct RnNsAdapter::Impl {
+  DenoiseState* st = nullptr;          // RNNoise state
+  SpeexResamplerState* up = nullptr;   // 16k -> 48k (only at 16k tier)
+  SpeexResamplerState* down = nullptr; // 48k -> 16k (only at 16k tier)
+  int sample_rate_hz = 0;
 
-RnNsAdapter::~RnNsAdapter() {
-  if (st_) rnnoise_destroy(st_);
-  if (up_) speex_resampler_destroy(up_);
-  if (down_) speex_resampler_destroy(down_);
-}
+  ~Impl() {
+    if (st) rnnoise_destroy(st);
+    if (up) speex_resampler_destroy(up);
+    if (down) speex_resampler_destroy(down);
+  }
+};
+
+RnNsAdapter::RnNsAdapter() : impl_(std::make_unique<Impl>()) {}
+RnNsAdapter::~RnNsAdapter() = default;  // unique_ptr<Impl> handles cleanup
 
 bool RnNsAdapter::Init(int sample_rate_hz) {
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
   // Tear down any previous state (Reset path or repeated Init).
-  if (st_) { rnnoise_destroy(st_); st_ = nullptr; }
-  if (up_) { speex_resampler_destroy(up_); up_ = nullptr; }
-  if (down_) { speex_resampler_destroy(down_); down_ = nullptr; }
+  if (impl_->st) { rnnoise_destroy(impl_->st); impl_->st = nullptr; }
+  if (impl_->up) { speex_resampler_destroy(impl_->up); impl_->up = nullptr; }
+  if (impl_->down) { speex_resampler_destroy(impl_->down); impl_->down = nullptr; }
 
-  st_ = rnnoise_create(/*model=*/nullptr);
-  if (!st_) return false;
+  impl_->st = rnnoise_create(/*model=*/nullptr);
+  if (!impl_->st) return false;
 
   if (sample_rate_hz == 16000) {
     int err = 0;
-    up_ = speex_resampler_init(/*channels=*/1, /*in=*/16000, /*out=*/48000,
-                               kSpeexQuality, &err);
-    if (!up_ || err != 0) return false;
-    down_ = speex_resampler_init(1, 48000, 16000, kSpeexQuality, &err);
-    if (!down_ || err != 0) return false;
+    impl_->up = speex_resampler_init(/*channels=*/1, /*in=*/16000, /*out=*/48000,
+                                     kSpeexQuality, &err);
+    if (!impl_->up || err != 0) return false;
+    impl_->down = speex_resampler_init(1, 48000, 16000, kSpeexQuality, &err);
+    if (!impl_->down || err != 0) return false;
   }
-  // 48 kHz tier: no resampling; up_/down_ stay null.
+  // 48 kHz tier: no resampling; up/down stay null.
 
-  sample_rate_hz_ = sample_rate_hz;
+  impl_->sample_rate_hz = sample_rate_hz;
   return true;
 }
 
 void RnNsAdapter::Reset() {
-  if (st_) {
-    rnnoise_destroy(st_);
-    st_ = rnnoise_create(/*model=*/nullptr);
+  if (impl_->st) {
+    rnnoise_destroy(impl_->st);
+    impl_->st = rnnoise_create(/*model=*/nullptr);
   }
-  if (up_) speex_resampler_reset_mem(up_);
-  if (down_) speex_resampler_reset_mem(down_);
+  if (impl_->up) speex_resampler_reset_mem(impl_->up);
+  if (impl_->down) speex_resampler_reset_mem(impl_->down);
 }
 
 void RnNsAdapter::Process(Frame& f) {
-  if (!st_) return;
-  if (f.n_channels != 1 || f.n_samples != FrameSamplesFor(sample_rate_hz_)) {
+  if (!impl_->st) return;
+  if (f.n_channels != 1 || f.n_samples != FrameSamplesFor(impl_->sample_rate_hz)) {
     std::fprintf(stderr,
         "RnNsAdapter::Process: dropping frame (n_channels=%d expected=1, n_samples=%d expected=%d)\n",
-        f.n_channels, f.n_samples, FrameSamplesFor(sample_rate_hz_));
+        f.n_channels, f.n_samples, FrameSamplesFor(impl_->sample_rate_hz));
     return;
   }
 
   // Working buffer at 48 kHz.
   std::array<float, kRnnoiseFrameSamples> rnnoise_buf{};
 
-  if (sample_rate_hz_ == 48000) {
+  if (impl_->sample_rate_hz == 48000) {
     // Direct: int16 -> float (int16-range, NOT normalized).
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       rnnoise_buf[i] = static_cast<float>(f.ch[0][i]);
     }
-    rnnoise_process_frame(st_, rnnoise_buf.data(), rnnoise_buf.data());
+    rnnoise_process_frame(impl_->st, rnnoise_buf.data(), rnnoise_buf.data());
     for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
       const float v = rnnoise_buf[i];
       f.ch[0][i] = static_cast<int16_t>(
@@ -87,7 +98,7 @@ void RnNsAdapter::Process(Frame& f) {
   std::array<int16_t, kRnnoiseFrameSamples> up_buf{};
   spx_uint32_t in_len = static_cast<spx_uint32_t>(f.n_samples);          // 160
   spx_uint32_t out_len = kRnnoiseFrameSamples;                            // 480
-  speex_resampler_process_int(up_, /*channel=*/0,
+  speex_resampler_process_int(impl_->up, /*channel=*/0,
                               f.ch[0].data(), &in_len,
                               up_buf.data(), &out_len);
   // Note: SpeexDSP may produce slightly fewer than 480 samples in a single
@@ -101,7 +112,7 @@ void RnNsAdapter::Process(Frame& f) {
   for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
     rnnoise_buf[i] = static_cast<float>(up_buf[i]);
   }
-  rnnoise_process_frame(st_, rnnoise_buf.data(), rnnoise_buf.data());
+  rnnoise_process_frame(impl_->st, rnnoise_buf.data(), rnnoise_buf.data());
   std::array<int16_t, kRnnoiseFrameSamples> processed_48k{};
   for (int i = 0; i < kRnnoiseFrameSamples; ++i) {
     const float v = rnnoise_buf[i];
@@ -112,7 +123,7 @@ void RnNsAdapter::Process(Frame& f) {
   // Step 3: int16 48k -> int16 16k (back to f.ch[0]).
   in_len = kRnnoiseFrameSamples;
   out_len = static_cast<spx_uint32_t>(f.n_samples);
-  speex_resampler_process_int(down_, 0,
+  speex_resampler_process_int(impl_->down, 0,
                               processed_48k.data(), &in_len,
                               f.ch[0].data(), &out_len);
   // Same warmup caveat for downsample. Zero-pad short output.
