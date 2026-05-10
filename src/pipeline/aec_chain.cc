@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "core/frame.h"
@@ -11,16 +12,6 @@
 namespace ecnr {
 
 namespace {
-
-// Energy of an int16 frame, normalized to [0, 1].
-double FrameEnergy(const Frame& f) {
-  double e = 0.0;
-  for (int16_t s : f.samples) {
-    const double x = static_cast<double>(s) / 32768.0;
-    e += x * x;
-  }
-  return e / kFrameSamples;
-}
 
 // Phase 0 stub: a primitive linear AEC that subtracts an exponentially-smoothed
 // estimate of the render frame from capture, with a fixed delay-line. NOT a
@@ -70,6 +61,7 @@ struct AecChain::Impl {
   StubNs ns;
   ChainStats stats;
   int sample_rate_hz = 0;
+  int stream_delay_ms = 0;
 };
 
 AecChain::AecChain() : impl_(std::make_unique<Impl>()) {}
@@ -93,10 +85,8 @@ void AecChain::ProcessRender(const Frame& render) {
 void AecChain::ProcessCapture(const Frame& capture, Frame& out) {
   const auto t0 = std::chrono::steady_clock::now();
 
-  const double e_in = FrameEnergy(capture);
   impl_->aec.ProcessCapture(capture, out);
   impl_->ns.Process(out);
-  const double e_out = FrameEnergy(out);
 
   const auto t1 = std::chrono::steady_clock::now();
   impl_->stats.cpu_time_s +=
@@ -104,18 +94,22 @@ void AecChain::ProcessCapture(const Frame& capture, Frame& out) {
   impl_->stats.audio_time_s +=
       static_cast<double>(kFrameDurationMs) / 1000.0;
 
-  // ERLE = 10 log10(E_in / E_out), clamped to non-negative for sanity.
-  if (e_in > 1e-12 && e_out > 1e-12) {
-    impl_->stats.erle_db = 10.0 * std::log10(e_in / e_out);
-  } else {
-    impl_->stats.erle_db = 0.0;
-  }
+  // Per ADR-0006: APM-style stats (ERLE, ERL, residual-echo likelihood, ...)
+  // are populated by the WebRTC backend wired in Task 6. Under the stub,
+  // all optional fields stay nullopt — a manually-computed energy ratio
+  // here would be misleading and is intentionally not surfaced.
 }
 
 void AecChain::Reset() {
   impl_->aec.Reset();
   impl_->ns.Reset();
   impl_->stats = {};
+}
+
+bool AecChain::SetStreamDelayMs(int ms) {
+  if (ms < 0 || ms > 500) return false;
+  impl_->stream_delay_ms = ms;
+  return true;
 }
 
 const ChainStats& AecChain::Stats() const { return impl_->stats; }

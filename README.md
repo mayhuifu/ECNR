@@ -131,13 +131,13 @@ This produces three 10-second 16 kHz mono WAVs:
 **Expected (numbers will vary slightly):**
 
 ```
-frames=1000  audio=10.000s  cpu=0.001s  rtf=0.0001  erle_last=-5.15dB
+frames=1000  audio=10.000s  cpu=0.001s  rtf=0.0001  erle_db=0.00 (stub: 0)
 ```
 
 **How to read it:**
 - `frames=1000` and `audio=10.000s` → the harness consumed all 10 s of the input pair correctly.
 - `rtf` ≪ 1.0 → the chain is faster than realtime (under stubs it's trivially fast; under Phase 0.5 expect roughly 0.05–0.20 on this M-class machine).
-- `erle_last` is the ERLE on the **last** processed frame only. Negative values are normal under the Phase 0 stub on this stimulus because the stub over-cancels. Don't read this number as the chain's true echo-cancellation quality — that's what Phase 0.5 unlocks. The unit test (Step B) checks the **cumulative** ERLE, which is the right signal.
+- `erle_db` comes from `ChainStats::echo_return_loss_enhancement_db`, an `std::optional<double>` that mirrors `webrtc::AudioProcessingStats::echo_return_loss_enhancement` (per ADR-0006). Under the Phase 0 stub the optional is `nullopt` and the printout falls back to `0.00`; the real number arrives once the WebRTC APM backend is wired in Task 6. The unit test (Step B) checks **cumulative** energy attenuation directly, which is the right signal under stubs.
 
 ```sh
 ls -la /tmp/ecnr_offline_out.wav  # should be ~320 KB (10 s × 16 kHz × 2 bytes)
@@ -161,14 +161,14 @@ ls -la /tmp/ecnr_offline_out.wav  # should be ~320 KB (10 s × 16 kHz × 2 bytes
 
 ```
 ecnr_live: playing reference/synth/ref.wav, capturing from default mic. ctrl-c to abort.
-frames=1000  audio=10.000s  rtf=...  erle_last=...  cap_dropped=0  ref_dropped=0
+frames=1000  audio=10.000s  rtf=...  erle_db=0.00 (stub: 0)  cap_dropped=0  ref_dropped=0
 ```
 
 **How to read it:**
 - `cap_dropped=0` and `ref_dropped=0` → no buffer overruns; capture and render kept up. Non-zero numbers indicate either a thread starvation issue or a too-small ring-buffer (currently 1 s / 16000 samples per ring).
 - `frames=1000` (matching the 10 s stimulus / 10 ms frames) → live loop ran cleanly to completion.
 - `rtf` should be similar to the offline run (Step D). Big swings indicate scheduling or device-side jitter.
-- `erle_last` again is just the last-frame snapshot; not a quality metric under stubs.
+- `erle_db` falls back to `0.00` under the Phase 0 stub (the optional `echo_return_loss_enhancement_db` is `nullopt`). Real values land in Task 6 with the WebRTC backend.
 
 **Listening test:**
 

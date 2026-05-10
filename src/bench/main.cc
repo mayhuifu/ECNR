@@ -98,7 +98,11 @@ int main(int argc, char** argv) {
   }
 
   const auto& s = chain.Stats();
-  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f  erle_last=%.2fdB\n",
-              total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf(), s.erle_db);
+  // erle_db is sourced from APM stats (Task 6); under the Phase-0 stub the
+  // optional is nullopt and this prints 0.00.
+  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f  "
+              "erle_db=%.2f (stub: 0)\n",
+              total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf(),
+              s.echo_return_loss_enhancement_db.value_or(0.0));
   return 0;
 }

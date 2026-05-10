@@ -2,21 +2,41 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "core/frame.h"
 
 namespace ecnr {
 
 // Aggregated runtime stats for the chain. Updated each ProcessCapture call.
+// Optional fields mirror webrtc::AudioProcessingStats field-for-field
+// (per ADR-0006); under the Phase-0 stub they all stay nullopt and are
+// populated by the WebRTC APM backend wired in Task 6.
 struct ChainStats {
-  // Echo Return Loss Enhancement (dB), instantaneous over the last frame.
-  // Defined as 10 * log10(E_capture / E_residual). Higher = more echo removed.
-  // Set to 0.0 if either signal is silent.
-  double erle_db = 0.0;
   // Cumulative wallclock seconds spent in ProcessRender + ProcessCapture.
   double cpu_time_s = 0.0;
   // Cumulative seconds of audio passed through the chain.
   double audio_time_s = 0.0;
+
+  // ERLE = 10*log10(P_echo / P_out). Mirrors
+  // webrtc::AudioProcessingStats::echo_return_loss_enhancement.
+  std::optional<double> echo_return_loss_enhancement_db;
+  // ERL = 10*log10(P_far / P_echo). Mirrors
+  // webrtc::AudioProcessingStats::echo_return_loss.
+  std::optional<double> echo_return_loss_db;
+  // Likelihood [0..1] that residual echo is present. Mirrors
+  // residual_echo_likelihood.
+  std::optional<double> residual_echo_likelihood;
+  // Recent maximum of residual_echo_likelihood. Mirrors
+  // residual_echo_likelihood_recent_max.
+  std::optional<double> residual_echo_likelihood_recent_max;
+  // AEC3's current delay estimate in ms. Mirrors delay_ms.
+  std::optional<int>    delay_ms;
+  // Median observed delay. Mirrors delay_median_ms.
+  std::optional<int>    delay_median_ms;
+  // Fraction of time the adaptive filter is divergent. Mirrors
+  // divergent_filter_fraction.
+  std::optional<double> divergent_filter_fraction;
 
   // Real-Time Factor: cpu_time / audio_time. < 1.0 = faster than realtime.
   double Rtf() const {
@@ -49,6 +69,13 @@ class AecChain {
   // Drop adapted state — call on stream restart, sample-rate change, or
   // confirmed routing change at the HAL.
   void Reset();
+
+  // Inform the chain of the latency between the render-tap signal previously
+  // pushed via ProcessRender and the corresponding mic frame about to be
+  // pushed via ProcessCapture. WebRTC AEC3 (wired in Task 6) uses this to
+  // seed its delay estimator; passing the wrong value makes AEC fail-quiet
+  // (no apparent echo cancellation). 0 ≤ ms ≤ 500. Returns false on out-of-range.
+  bool SetStreamDelayMs(int ms);
 
   const ChainStats& Stats() const;
 

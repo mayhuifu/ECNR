@@ -76,6 +76,38 @@ TEST(AecChain, AttenuatesCorrelatedEcho) {
   EXPECT_GT(erle_db, 5.0) << "Phase 0 stub AEC failed to attenuate echo";
 }
 
+TEST(AecChain, SetStreamDelayMsAcceptedInRange) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(kSampleRateHz));
+  EXPECT_TRUE(c.SetStreamDelayMs(50));
+  EXPECT_TRUE(c.SetStreamDelayMs(0));
+  EXPECT_TRUE(c.SetStreamDelayMs(500));
+  EXPECT_FALSE(c.SetStreamDelayMs(-1));
+  EXPECT_FALSE(c.SetStreamDelayMs(501));
+  EXPECT_FALSE(c.SetStreamDelayMs(5000));
+}
+
+TEST(AecChain, EchoReturnLossEnhancementOptionalUnsetUnderStub) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(kSampleRateHz));
+  std::mt19937 rng(0x1111);
+  Frame far, mic, out;
+  for (int i = 0; i < 10; ++i) {
+    FillNoise(far, rng);
+    FillNoise(mic, rng);
+    c.ProcessRender(far);
+    c.ProcessCapture(mic, out);
+  }
+  // Stub backend does not surface APM stats; all optional fields are nullopt.
+  EXPECT_FALSE(c.Stats().echo_return_loss_enhancement_db.has_value());
+  EXPECT_FALSE(c.Stats().echo_return_loss_db.has_value());
+  EXPECT_FALSE(c.Stats().residual_echo_likelihood.has_value());
+  EXPECT_FALSE(c.Stats().residual_echo_likelihood_recent_max.has_value());
+  EXPECT_FALSE(c.Stats().delay_ms.has_value());
+  EXPECT_FALSE(c.Stats().delay_median_ms.has_value());
+  EXPECT_FALSE(c.Stats().divergent_filter_fraction.has_value());
+}
+
 TEST(AecChain, RtfIsMeasured) {
   AecChain c;
   ASSERT_TRUE(c.Init(kSampleRateHz));

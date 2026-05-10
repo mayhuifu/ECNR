@@ -244,10 +244,13 @@ int main(int argc, char** argv) {
   }
 
   const auto& s = chain.Stats();
-  std::printf("frames=%llu  audio=%.3fs  rtf=%.4f  erle_last=%.2fdB  "
+  // erle_db is sourced from APM stats (Task 6); under the Phase-0 stub the
+  // optional is nullopt and this prints 0.00.
+  std::printf("frames=%llu  audio=%.3fs  rtf=%.4f  erle_db=%.2f (stub: 0)  "
               "cap_dropped=%llu  ref_dropped=%llu\n",
               static_cast<unsigned long long>(frames_processed),
-              s.audio_time_s, s.Rtf(), s.erle_db,
+              s.audio_time_s, s.Rtf(),
+              s.echo_return_loss_enhancement_db.value_or(0.0),
               static_cast<unsigned long long>(st.capture_dropped.load()),
               static_cast<unsigned long long>(st.render_dropped.load()));
   return 0;
