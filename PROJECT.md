@@ -47,6 +47,7 @@ The source research is primarily *cellular* (VoLTE/VoNR). The following must be 
 |---|---|---|
 | **0. Bootstrap** | Project doc + vendor manifest + scaffold with **stub** AEC/NS backends + green smoke test on dev host | Done |
 | **0.5 Backend wiring** | Replace stubs with real WebRTC AEC3 + RNNoise behind same `AecChain` interface; tighten ERLE assertion to > 15 dB | Next |
+| **0.6 Host live E2E** | `ecnr_live` binary using miniaudio: play stimulus through Mac speakers, capture from mac mic, run AecChain live, write recovered output + report measured ERLE. Cross-platform-ready (Mac/Linux/Windows). | Next |
 | 1. Baseline tier on A55 | Cross-compile, productize WebRTC AEC3 + RNNoise, A/B vs reference set | |
 | 2. Cabin characterization | Measure cabin IR; build road/wind/HVAC + double-talk reference corpus | Vehicle access required |
 | 3. Hybrid v1 | Integrate **NKF-AEC** (5.3K params, RTF 0.09) or **DTLN-AEC** as neural RES post-filter | Verify licenses first |
@@ -103,6 +104,8 @@ ECNR/
 - **2026-05-09** — Project repo lives at `/Users/huifu/Project/ECNR`. Decision on remote (GitHub/GitLab) deferred.
 - **2026-05-09** — `vendor/` source is **not** committed to git (~451 MB; mostly DeepFilterNet + DTLN-aec pretrained models). Pinned by `vendor/MANIFEST.tsv` with upstream URL + commit SHA, fetched on demand via `scripts/fetch-vendor.sh`.
 - **2026-05-09** — Phase 0 ships **stub** AEC + NS backends behind the `AecChain` interface to unblock the architecture and harness. Real WebRTC AEC3 + RNNoise wiring is its own milestone (Phase 0.5) — defers Meson + autotools build orchestration to a focused effort with visible scaffold progress already on the trunk.
+- **2026-05-09** — Add Phase 0.6 (host live E2E on macOS) using **miniaudio** (single-header, public-domain/MIT, cross-platform). Vendored at `third_party/miniaudio/miniaudio.h`. Picked over PortAudio for zero-dep build and over CoreAudio for cross-platform reach (Linux ALSA / Windows WASAPI come for free).
+- **2026-05-09** — Project published to https://github.com/mayhuifu/ECNR (public).
 
 ## Open questions
 

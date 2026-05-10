@@ -51,6 +51,20 @@ ctest --test-dir build --output-on-failure
 
 Expected (Phase 0): three tests pass under stub backends; the echo-attenuation test asserts cumulative ERLE > 5 dB. Phase 0.5 will tighten to > 15 dB once AEC3 + RNNoise replace the stubs.
 
+## Run the host live E2E loopback
+
+```sh
+# generate a stimulus first if you don't have one
+python3 reference/gen_synth.py --duration 10 --out-dir reference/synth/
+
+# play stimulus through the default speaker, capture from default mic, AEC, write output
+./build/ecnr_live --stimulus reference/synth/ref.wav --out /tmp/live_out.wav
+```
+
+macOS will prompt for **Microphone permission** the first time. Approve it for your terminal app (System Settings → Privacy & Security → Microphone).
+
+The captured signal includes the speaker echo plus whatever your room produces (HVAC, typing, footsteps). The chain runs the same `AecChain` as `ecnr_bench` — under the Phase 0 stub it'll attenuate the recorded echo only roughly; under Phase 0.5 (real AEC3 + RNNoise) it'll be the actual baseline measurement of how well the pipeline survives a real acoustic path.
+
 ## Run the offline bench harness
 
 ```sh
@@ -75,7 +89,8 @@ python3 reference/gen_synth.py --duration 10 --out-dir reference/synth/
 | `src/core/` | Frame, ring buffer, resampler |
 | `src/pipeline/` | `AecChain` — AEC3 + RNNoise wire-up |
 | `src/hal/` | Mic/render abstraction (file-backed in v1) |
-| `src/bench/` | Offline benchmark binary |
+| `src/bench/` | Offline benchmark binary (`ecnr_bench`) |
+| `src/live/` | Host live loopback binary (`ecnr_live`, miniaudio mic + speaker) |
 | `src/tests/` | gtest |
 | `models/` | Neural model artifacts (Phase 3+) |
 | `reference/` | Test audio |

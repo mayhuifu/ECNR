@@ -58,6 +58,29 @@ target_link_libraries(ecnr_hal PUBLIC ecnr_core PkgConfig::SNDFILE)
 add_executable(ecnr_bench src/bench/main.cc)
 target_link_libraries(ecnr_bench PRIVATE ecnr_pipeline ecnr_hal)
 
+# --- ecnr_live (host loopback E2E via miniaudio) -------------------------------
+# miniaudio is a single-header library — we vendor the pinned header at
+# third_party/miniaudio/. Linker flags below cover macOS CoreAudio; on Linux
+# we link ALSA + pthread + dl + m.
+add_executable(ecnr_live src/live/live_loopback.cc)
+target_link_libraries(ecnr_live PRIVATE ecnr_pipeline ecnr_hal)
+target_include_directories(ecnr_live PRIVATE third_party/miniaudio)
+if(APPLE)
+  target_link_libraries(ecnr_live PRIVATE
+    "-framework CoreFoundation"
+    "-framework CoreAudio"
+    "-framework AudioToolbox"
+    "-framework AudioUnit"
+  )
+elseif(UNIX)
+  find_package(Threads REQUIRED)
+  target_link_libraries(ecnr_live PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+  pkg_check_modules(ALSA alsa)
+  if(ALSA_FOUND)
+    target_link_libraries(ecnr_live PRIVATE PkgConfig::ALSA)
+  endif()
+endif()
+
 # --- tests ---------------------------------------------------------------------
 enable_testing()
 add_executable(aec_chain_test src/tests/aec_chain_test.cc)
