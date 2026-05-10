@@ -18,8 +18,10 @@
 #define MA_NO_ENCODING
 #include "miniaudio.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -38,12 +40,25 @@ namespace {
 struct Args {
   std::string stimulus;       // WAV to play out the speakers (the "render" / far-end)
   std::string out = "live_out.wav";
+  std::string out_raw;        // optional: raw captured-mic WAV (post-injection, pre-AEC)
+  std::string inject_noise;   // optional: WAV mixed into capture stream before AEC
+  double inject_gain_db = -12.0;  // gain applied to injected noise before mixing
   double duration_s = 0.0;    // 0 = play stimulus to completion
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
-      "usage: %s --stimulus stim.wav [--out live_out.wav] [--duration SECONDS]\n",
+      "usage: %s --stimulus stim.wav [--out live_out.wav] [--out-raw raw.wav]\n"
+      "       [--inject-noise noise.wav] [--inject-gain-db DB] [--duration SECONDS]\n"
+      "\n"
+      "  --stimulus FILE       (required) WAV played out the speakers (far-end / render)\n"
+      "  --out FILE            processed AEC+NS output (default: live_out.wav)\n"
+      "  --out-raw FILE        raw captured mic stream (post noise-injection, pre-AEC)\n"
+      "                        — the 'before' track for A/B demos\n"
+      "  --inject-noise FILE   WAV mixed into the capture stream before AEC sees it\n"
+      "                        (must match stimulus rate, mono int16; loops if shorter)\n"
+      "  --inject-gain-db DB   gain applied to injected noise (default: -12.0)\n"
+      "  --duration SECONDS    cap session length (default: stimulus duration)\n",
       prog);
 }
 
@@ -52,6 +67,9 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     const std::string flag = argv[i];
     if (flag == "--stimulus" && i + 1 < argc) a->stimulus = argv[++i];
     else if (flag == "--out" && i + 1 < argc) a->out = argv[++i];
+    else if (flag == "--out-raw" && i + 1 < argc) a->out_raw = argv[++i];
+    else if (flag == "--inject-noise" && i + 1 < argc) a->inject_noise = argv[++i];
+    else if (flag == "--inject-gain-db" && i + 1 < argc) a->inject_gain_db = std::stod(argv[++i]);
     else if (flag == "--duration" && i + 1 < argc) a->duration_s = std::stod(argv[++i]);
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
@@ -82,6 +100,14 @@ struct LiveState {
 
   std::atomic<uint64_t> capture_dropped{0};
   std::atomic<uint64_t> render_dropped{0};
+
+  // Optional noise-injection state. The capture callback is the only thread
+  // that reads `inject_samples` and the only writer of `inject_pos`, so no
+  // locking is needed for these — they're effectively callback-local. The
+  // gain is precomputed at startup from --inject-gain-db.
+  std::vector<int16_t> inject_samples;  // empty => injection disabled
+  size_t inject_pos = 0;
+  float inject_linear_gain = 1.0f;
 
   std::atomic<bool> stop{false};
 };
@@ -125,8 +151,38 @@ void PlaybackCallback(ma_device* dev, void* output, const void* /*input*/, ma_ui
 void CaptureCallback(ma_device* dev, void* /*output*/, const void* input, ma_uint32 frame_count) {
   auto* st = static_cast<LiveState*>(dev->pUserData);
   const auto* in = static_cast<const int16_t*>(input);
+
+  // Fast path with no noise injection: copy mic samples straight into the ring.
+  if (st->inject_samples.empty()) {
+    std::lock_guard<std::mutex> lk(st->mu);
+    const size_t wrote = st->capture_ring.Write(in, frame_count);
+    if (wrote < frame_count) {
+      st->capture_dropped.fetch_add(frame_count - wrote, std::memory_order_relaxed);
+    }
+    return;
+  }
+
+  // Software-mix path: pull `frame_count` samples from the looped noise buffer,
+  // apply linear gain, add to the mic samples with int16 saturation, then
+  // forward the mixed stream to the ring. The chain (and --out-raw) sees the
+  // mixed signal, not the bare mic. This is "Option A" — injection happens
+  // BEFORE AEC, and crucially the render/render-tap still carries only the
+  // stimulus, so AEC3 treats the injected noise as near-end noise (not echo)
+  // and leaves it for RNNoise to suppress.
+  std::vector<int16_t> mixed(frame_count);
+  const size_t noise_n = st->inject_samples.size();
+  for (ma_uint32 i = 0; i < frame_count; ++i) {
+    const float noise = static_cast<float>(st->inject_samples[st->inject_pos]) *
+                        st->inject_linear_gain;
+    st->inject_pos = (st->inject_pos + 1) % noise_n;
+    float sum = static_cast<float>(in[i]) + noise;
+    if (sum > 32767.0f) sum = 32767.0f;
+    if (sum < -32768.0f) sum = -32768.0f;
+    mixed[i] = static_cast<int16_t>(sum);
+  }
+
   std::lock_guard<std::mutex> lk(st->mu);
-  const size_t wrote = st->capture_ring.Write(in, frame_count);
+  const size_t wrote = st->capture_ring.Write(mixed.data(), frame_count);
   if (wrote < frame_count) {
     st->capture_dropped.fetch_add(frame_count - wrote, std::memory_order_relaxed);
   }
@@ -158,6 +214,30 @@ int main(int argc, char** argv) {
 
   LiveState st;
   st.stimulus = std::move(stim.samples);
+
+  // Optional noise injection: load + validate before opening the audio devices
+  // so a misconfiguration fails fast instead of mid-session.
+  if (!args.inject_noise.empty()) {
+    ecnr::hal::WavData noise;
+    if (!ecnr::hal::ReadWavMono(args.inject_noise, &noise, &err)) {
+      std::fprintf(stderr, "read inject-noise: %s\n", err.c_str());
+      return 1;
+    }
+    if (!ecnr::IsSupportedSampleRate(noise.sample_rate_hz) ||
+        noise.sample_rate_hz != sample_rate_hz) {
+      std::fprintf(stderr,
+                   "inject-noise sample rate (%d Hz) must match stimulus rate (%d Hz)\n",
+                   noise.sample_rate_hz, sample_rate_hz);
+      return 1;
+    }
+    if (noise.samples.empty()) {
+      std::fprintf(stderr, "inject-noise WAV is empty\n");
+      return 1;
+    }
+    st.inject_samples = std::move(noise.samples);
+    st.inject_linear_gain =
+        static_cast<float>(std::pow(10.0, args.inject_gain_db / 20.0));
+  }
 
   // Install a ctrl-C handler that flips st.stop. Without this, ctrl-C
   // terminates the process before WriteWavMono runs and no output WAV is
@@ -234,6 +314,14 @@ int main(int argc, char** argv) {
 
   std::vector<int16_t> processed;
   processed.reserve(st.stimulus.size());
+  // `raw` mirrors `processed` for the "before" track. It's the post-injection
+  // mic stream — exactly what we hand to AEC — which is the right reference
+  // for an A/B listening test ("here's what the chain saw; here's what it
+  // produced"). When --inject-noise is unset, raw == bare mic capture.
+  std::vector<int16_t> raw;
+  if (!args.out_raw.empty()) {
+    raw.reserve(st.stimulus.size());
+  }
 
   ecnr::Frame mic_f, ref_f, out_f;
   const auto t_start = std::chrono::steady_clock::now();
@@ -261,6 +349,13 @@ int main(int argc, char** argv) {
       }
     }
     if (got_pair) {
+      // Snapshot the mic frame BEFORE the chain mutates anything (currently
+      // ProcessCapture takes mic_f by const ref, but capturing here keeps the
+      // raw trace decoupled from any future signature change).
+      if (!args.out_raw.empty()) {
+        raw.insert(raw.end(), mic_f.ch[0].begin(),
+                   mic_f.ch[0].begin() + mic_f.n_samples);
+      }
       chain.ProcessRender(ref_f);
       chain.ProcessCapture(mic_f, out_f);
       processed.insert(processed.end(), out_f.ch[0].begin(),
@@ -311,6 +406,12 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "write out: %s\n", err.c_str());
     return 1;
   }
+  if (!args.out_raw.empty()) {
+    if (!ecnr::hal::WriteWavMono(args.out_raw, raw, sample_rate_hz, &err)) {
+      std::fprintf(stderr, "write out-raw: %s\n", err.c_str());
+      return 1;
+    }
+  }
 
   const auto& s = chain.Stats();
   // erle_db is sourced from APM stats (Task 6); under the Phase-0 stub the
@@ -324,9 +425,14 @@ int main(int argc, char** argv) {
   } else {
     std::printf("  erle_db=N/A");
   }
-  std::printf("  cap_dropped=%llu  ref_dropped=%llu  chain_dropped=%llu\n",
+  std::printf("  cap_dropped=%llu  ref_dropped=%llu  chain_dropped=%llu",
               static_cast<unsigned long long>(st.capture_dropped.load()),
               static_cast<unsigned long long>(st.render_dropped.load()),
               static_cast<unsigned long long>(s.frames_dropped));
+  if (!args.inject_noise.empty()) {
+    std::printf("  inject_noise=%s (%.1f dB)",
+                args.inject_noise.c_str(), args.inject_gain_db);
+  }
+  std::printf("\n");
   return 0;
 }

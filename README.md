@@ -130,16 +130,21 @@ python3 reference/gen_synth.py --duration 10 --out-dir reference/synth/
 **Expected:**
 
 ```
-wrote reference/synth/{ref,mic,near_clean}.wav  (10.0s @ 16000 Hz)
+wrote reference/synth/{ref,mic,near_clean,noise_road,noise_bark,noise_hvac}.wav  (10.0s @ 16000 Hz)
 ```
 
-This produces three 10-second 16 kHz mono WAVs:
+This produces six 10-second 16 kHz mono WAVs:
 
 | File | Contents |
 |---|---|
 | `ref.wav` | White noise — the "far-end" stimulus, what the speaker would play |
 | `mic.wav` | `ref.wav` convolved with a 30 ms synthetic IR + a low-amplitude near-end tone |
 | `near_clean.wav` | The near-end tone alone (the "oracle" — what AEC should ideally recover) |
+| `noise_road.wav` | Pink-ish broadband rumble + low-frequency wobble (~-20 dBFS RMS) — for `--inject-noise` |
+| `noise_bark.wav` | 4-8 short band-limited bursts (peak ~-6 dBFS) — for `--inject-noise` |
+| `noise_hvac.wav` | 60 Hz hum + harmonics over a low pink floor (~-22 dBFS RMS) — for `--inject-noise` |
+
+Add `--noise-only` to regenerate just the three noise stems without rebuilding the stimulus pair.
 
 **Proves:** Python tooling and synthetic-corpus generation work. These files are git-ignored — regenerate on demand.
 
@@ -207,6 +212,57 @@ You should hear roughly your room ambient noise with the stimulus white-noise ec
 **Phase 0.5 verification:** run this once and listen-test the output. If the echo of the stimulus is audibly removed (or near-removed), Phase 0.5 backend wiring is functioning end-to-end on your hardware. If you still hear most of the white noise, check the prerequisites: speakers actually playing audibly into the mic (not muted, not unplugged), no aggressive OS-level AEC on the input device, and the `erle_db` summary value should be a few dB or higher.
 
 **Proves:** CoreAudio backend works, miniaudio capture + playback callbacks plumb correctly into the ring buffers, the AEC chain processes a live stream without dropping frames, and the captured echo is removed by the real WebRTC AEC3 + RNNoise backends.
+
+### Step E.1 — Demo: A/B with noise injection
+
+The fastest way to convince yourself (or anyone else) that the AEC + NS chain is doing real work is to listen to the **same captured mic stream** before and after the chain processes it. `ecnr_live` supports this directly with `--out-raw` (the "before" — what the chain saw) alongside `--out` (the "after"). Optionally, use `--inject-noise` to software-mix a synthetic background noise WAV into the captured mic stream **before** the AEC chain sees it (Option A: pure software mix in the capture path, **not** played through the speakers). The render reference still carries only the stimulus, so AEC3 treats the injected noise as near-end noise — exactly what RNNoise is supposed to suppress.
+
+First, regenerate the synthetic noise WAVs (Step C produces these by default; if you skipped them, run with `--noise-only` to generate just the noise stems):
+
+```sh
+python3 reference/gen_synth.py --duration 10 --out-dir reference/synth/
+# or, just the three noise files:
+python3 reference/gen_synth.py --duration 10 --out-dir reference/synth/ --noise-only
+```
+
+Three example invocations:
+
+```sh
+# 1. Baseline: white noise stimulus + speech, no extra background noise.
+./build/ecnr_live \
+  --stimulus reference/synth/ref.wav \
+  --out /tmp/aec_after.wav \
+  --out-raw /tmp/aec_before.wav
+
+# 2. With synthetic road noise mixed in (-9 dB so it's clearly audible):
+./build/ecnr_live \
+  --stimulus reference/synth/ref.wav \
+  --inject-noise reference/synth/noise_road.wav \
+  --inject-gain-db -9 \
+  --out /tmp/aec_after.wav \
+  --out-raw /tmp/aec_before.wav
+
+# 3. With dog barks (louder, peaky):
+./build/ecnr_live \
+  --stimulus reference/synth/ref.wav \
+  --inject-noise reference/synth/noise_bark.wav \
+  --inject-gain-db -6 \
+  --out /tmp/aec_after.wav \
+  --out-raw /tmp/aec_before.wav
+```
+
+A/B playback recipe (macOS):
+
+```sh
+echo "=== BEFORE (raw mic + injected noise) ==="
+afplay /tmp/aec_before.wav
+echo "=== AFTER (AEC + RNNoise) ==="
+afplay /tmp/aec_after.wav
+```
+
+**What to expect:** speech (your voice) is preserved in both files; the white-noise stimulus echo present in `_before.wav` is substantially gone in `_after.wav` (that's AEC3 doing its job). Stationary injected noise — road rumble, HVAC hum — is also markedly reduced in `_after.wav` thanks to RNNoise. Bark-like transient noise is harder for RNNoise: a residual click usually survives. That's a known limitation of RNNoise's training distribution; stronger transient suppression is Phase 3's job (the neural post-processor).
+
+- Troubleshooting: if `_before.wav` is silent, mic permission isn't actually granted (System Settings → Privacy & Security → Microphone — restart the terminal after enabling). If `_after.wav` is silent but `_before.wav` has content, the chain over-cancelled (rare; investigate the run's `erle_db` and `chain_dropped` numbers).
 
 ### Step F — Re-fetch vendor (optional, slow)
 
