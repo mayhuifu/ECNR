@@ -15,11 +15,12 @@ vendor/*/
 !vendor/MANIFEST.tsv
 !vendor/README.md
 
-# Editor / OS / LSP
+# Editor / OS / LSP / agent state
 .DS_Store
 .idea/
 .vscode/
 .cache/
+.claude/
 compile_commands.json
 *.swp
 *~
