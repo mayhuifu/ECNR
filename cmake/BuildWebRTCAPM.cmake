@@ -47,25 +47,39 @@ function(_configure_webrtc_apm)
   # around it by injecting -framework CoreFoundation into the link args; this is
   # only needed at example-link time and is harmless for our static lib output.
   set(_WEBRTC_APM_EXTRA_MESON_ARGS "")
+  set(_WEBRTC_APM_NEON_FLAG "-Dneon=disabled")
   if(APPLE)
     list(APPEND _WEBRTC_APM_EXTRA_MESON_ARGS
       "-Dcpp_link_args=-framework CoreFoundation"
       "-Dc_link_args=-framework CoreFoundation"
     )
+  elseif(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    # Cross-compile path (ADR-0001 A7; landed via scripts/cross-build-yocto/).
+    # The Yocto SDK's `meson` is a wrapper that auto-injects its
+    # `<tuple>-meson.cross` + `meson.native` files into every `meson setup`
+    # invocation, so we don't need to pass --cross-file here. A55 (and any
+    # modern aarch64) ships ARMv8.0-A + NEON / Advanced SIMD as a baseline,
+    # so enable the WebRTC APM NEON code paths.
+    #
+    # NB: the Scarthgap SDK ships a cross-file with [host_machine]
+    # cpu_family = 'x86_64' (a known Yocto bug), which trips the NEON
+    # detection branch in upstream meson.build. The Dockerfile in
+    # scripts/cross-build-yocto/ patches the cross-file in place at image-
+    # build time; if you're invoking this from a non-container environment,
+    # check that $OECORE_NATIVE_SYSROOT/usr/share/meson/aarch64-*-meson.cross
+    # has `cpu_family = 'aarch64'`.
+    set(_WEBRTC_APM_NEON_FLAG "-Dneon=enabled")
+    message(STATUS "BuildWebRTCAPM: cross-compiling for aarch64 — meson wrapper injects SDK cross-file automatically; NEON enabled")
   endif()
 
   ExternalProject_Add(webrtc_apm_external
     SOURCE_DIR "${WEBRTC_APM_SOURCE_DIR}"
     BINARY_DIR "${WEBRTC_APM_BUILD_DIR}"
-    # TODO(phase-1): when cross-compiling for A55 (aarch64-linux-gnu):
-    #   - Pass --cross-file <toolchain.txt> to meson setup
-    #   - Flip -Dneon=disabled to -Dneon=enabled (A55 has NEON; macOS path doesn't compile NEON code)
-    #   - Add a CMAKE_CROSSCOMPILING branch alongside the APPLE branch for c_link_args / cpp_link_args
     CONFIGURE_COMMAND meson setup
       --prefix=${WEBRTC_APM_INSTALL_DIR}
       --buildtype=release
       --default-library=static
-      -Dneon=disabled
+      ${_WEBRTC_APM_NEON_FLAG}
       ${_WEBRTC_APM_EXTRA_MESON_ARGS}
       "${WEBRTC_APM_BUILD_DIR}"
       "${WEBRTC_APM_SOURCE_DIR}"

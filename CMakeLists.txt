@@ -105,22 +105,35 @@ target_link_libraries(ecnr_bench PRIVATE ecnr_pipeline ecnr_hal)
 # miniaudio is a single-header library — we vendor the pinned header at
 # third_party/miniaudio/. Linker flags below cover macOS CoreAudio; on Linux
 # we link ALSA + pthread + dl + m.
-add_executable(ecnr_live src/live/live_loopback.cc)
-target_link_libraries(ecnr_live PRIVATE ecnr_pipeline ecnr_hal)
-target_include_directories(ecnr_live PRIVATE third_party/miniaudio)
-if(APPLE)
-  target_link_libraries(ecnr_live PRIVATE
-    "-framework CoreFoundation"
-    "-framework CoreAudio"
-    "-framework AudioToolbox"
-    "-framework AudioUnit"
-  )
-elseif(UNIX)
-  find_package(Threads REQUIRED)
-  target_link_libraries(ecnr_live PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
-  pkg_check_modules(ALSA alsa)
-  if(ALSA_FOUND)
-    target_link_libraries(ecnr_live PRIVATE PkgConfig::ALSA)
+#
+# Gated behind ECNR_BUILD_LIVE because the host loopback harness is not a
+# deployment artefact — it's a macOS / Linux desktop development tool. The
+# aarch64 cross-compile spike (scripts/cross-build-yocto/) disables this
+# target so we don't drag miniaudio + ALSA into the cross-build before
+# we've decided whether ecnr_live runs on the U300 HAL at all.
+option(ECNR_BUILD_LIVE "Build the ecnr_live host loopback harness" ON)
+if(ECNR_BUILD_LIVE)
+  add_executable(ecnr_live src/live/live_loopback.cc)
+  target_link_libraries(ecnr_live PRIVATE ecnr_pipeline ecnr_hal)
+  target_include_directories(ecnr_live PRIVATE third_party/miniaudio)
+  if(APPLE)
+    target_link_libraries(ecnr_live PRIVATE
+      "-framework CoreFoundation"
+      "-framework CoreAudio"
+      "-framework AudioToolbox"
+      "-framework AudioUnit"
+    )
+  elseif(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ecnr_live PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+    # IMPORTED_TARGET is required for PkgConfig::ALSA to be created. The
+    # historic no-IMPORTED_TARGET form silently produced ALSA_FOUND but no
+    # PkgConfig::ALSA target; the subsequent target_link_libraries() then
+    # failed at configure time on any machine with a working ALSA.
+    pkg_check_modules(ALSA IMPORTED_TARGET alsa)
+    if(ALSA_FOUND)
+      target_link_libraries(ecnr_live PRIVATE PkgConfig::ALSA)
+    endif()
   endif()
 endif()
 
