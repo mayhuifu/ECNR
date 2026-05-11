@@ -542,6 +542,45 @@ frames=<N>  audio=<seconds>  rtf=<ratio>  erle_db=<dB>  cap_dropped=<N>  ref_dro
 - `--record-voice`: live mode, but no chain. Mutually exclusive with `--out` and `--inject-noise` (and any chain-output flag).
 - `--ns-dry-blend` and `--ns-vad-blend` both passed: `--ns-vad-blend` wins; Step B is a strict superset of Step A (uniform blend is the `low == high` case).
 
+### `ecnr_eval` — AEC3 tuning + ERLE measurement harness
+
+The harness behind the AEC3 tuning methodology locked in [ADR-0011](docs/adr/0011-aec3-tuning-methodology.md). Emits **two** ERLE numbers per condition:
+
+- **`erle_reported_*`** — AEC3's self-reported `echo_return_loss_enhancement_db` (operational telemetry, what production logs).
+- **`erle_true_*`** — externally computed by feeding the echo-only mic track through a fresh chain instance and RMS-comparing the residual output against the echo-only input. The two-number contract makes AEC3's self-report bias measurable.
+
+**`--self-test`** — in-memory synthetic fixture; asserts `erle_true_db_median > 12`. No file I/O. Used as CI smoke + harness hello-world.
+
+```
+$ ./build/ecnr_eval --self-test
+ecnr_eval self-test (5 s, 1 kHz tone, gain-0.5 echo, 16 kHz):
+  frames processed       = 500
+  reported ERLE median   = 0.18 dB (p10=0.18, p90=0.18)
+  true ERLE median       = 47.37 dB (p10=18.06, p90=80.00)
+  frames used (true)     = 400
+  frames skipped settle  = 100
+  frames below gate      = 0
+PASS
+```
+
+The reported-vs-true divergence on this synthetic fixture (~47 dB gap) is expected — AEC3's self-report isn't calibrated against the trivial-linear-echo case. On realistic cabin recordings the two should track within ~2 dB (ADR-0011 open assumption A3).
+
+**`--run --conditions DIR --out FILE.csv`** — sweep mode. Iterates `DIR/*/` subdirectories; each must contain `mic.wav` + `ref.wav` + `echo_only_mic.wav` (all same rate, all same length). Emits per-condition CSV rows. Phase 2 will feed this against the 134-case corpus; today it works against any compatible condition tree.
+
+```
+$ ./build/ecnr_eval --run --conditions ./conditions/synthetic --out results.csv
+condition case_001_quiet_cabin: 80000 samples @ 16000 Hz
+wrote results.csv (1 conditions processed, 0 skipped)
+
+$ head -2 results.csv
+condition_id,config_name,sample_rate_hz,erle_reported_median_db,…,frames_skipped_settle_true
+case_001_quiet_cabin,default-webrtc,16000,0.176,…,100
+```
+
+CSV schema is a strict subset of the locked ADR-0011 §4 contract: the `config_hash` and `condition_hash` columns are deferred until the TOML sweep parser lands. Today there is one config: `default-webrtc`.
+
+The CMake option `ECNR_BUILD_EVAL` (default ON) gates this target; cross-builds set it OFF — the harness is a host-only tool.
+
 ---
 
 ## Common failures & fixes
