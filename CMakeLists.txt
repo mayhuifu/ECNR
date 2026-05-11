@@ -97,6 +97,22 @@ add_library(ecnr_hal STATIC
 )
 target_link_libraries(ecnr_hal PUBLIC ecnr_core PkgConfig::SNDFILE)
 
+# --- ecnr_eval (AEC3 tuning + ERLE measurement harness) -----------------------
+# Per ADR-0011. Static lib `ecnr_eval_metrics` holds the pure ERLE math
+# (no chain dependency, fully unit-testable); the executable wires it
+# into the chain.
+add_library(ecnr_eval_metrics STATIC
+  src/eval/metrics.cc
+)
+target_link_libraries(ecnr_eval_metrics PUBLIC ecnr_core)
+
+option(ECNR_BUILD_EVAL "Build the ecnr_eval AEC3 tuning harness" ON)
+if(ECNR_BUILD_EVAL)
+  add_executable(ecnr_eval src/eval/eval_main.cc)
+  target_link_libraries(ecnr_eval PRIVATE
+    ecnr_pipeline ecnr_hal ecnr_eval_metrics)
+endif()
+
 # --- ecnr_bench (offline harness) ----------------------------------------------
 add_executable(ecnr_bench src/bench/main.cc)
 target_link_libraries(ecnr_bench PRIVATE ecnr_pipeline ecnr_hal)
@@ -147,6 +163,10 @@ gtest_discover_tests(aec_chain_test)
 add_executable(beamformer_test src/tests/beamformer_test.cc)
 target_link_libraries(beamformer_test PRIVATE ecnr_pipeline GTest::gtest_main)
 gtest_discover_tests(beamformer_test)
+
+add_executable(metrics_test src/tests/metrics_test.cc)
+target_link_libraries(metrics_test PRIVATE ecnr_eval_metrics GTest::gtest_main)
+gtest_discover_tests(metrics_test)
 
 # -----------------------------------------------------------------------------
 # Summary
