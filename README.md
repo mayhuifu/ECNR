@@ -439,11 +439,13 @@ Replays a `--mic` WAV through the AEC + NS chain using a paired `--ref` WAV as t
 
 | Flag | Argument | Required | Default | Purpose |
 |---|---|---|---|---|
-| `--mic` | path | yes | — | Mic-capture WAV (16 or 48 kHz mono int16). |
+| `--mic` | path | yes | — | Mic-capture WAV (16 or 48 kHz mono int16, or multi-channel up to `kMaxMics` per ADR-0010 option A). |
 | `--ref` | path | yes | — | Far-end reference WAV (same rate as `--mic`, mono int16). |
 | `--out` | path | no | `out.wav` | Output WAV for the chain's processed mono uplink. |
+| `--out-raw` | path | no | unset | "Before" WAV — captures `ch[0]` of the mic stream, length-aligned with `--out`. Use for direct A/B listening (`afplay before; afplay after`) or visual overlay in Audacity. The original `mic.wav` may be a few hundred samples longer because the chain drops trailing partial frames; `--out-raw` is exact-length. |
 | `--ns-dry-blend` | `<0..1>` | no | `0.0` | **Step A NS cap.** Uniform wet/dry mix on RNNoise's output: `final = α·input + (1−α)·rnnoise_out`. `0.0` = unchanged RNNoise; `0.25` ≈ −12 dB suppression floor; `1.0` = NS bypass. Mitigates chopped-voice artifact on heavy noise. |
 | `--ns-vad-blend` | `<low,high>` | no | unset | **Step B VAD-gated NS cap.** Interpolates α between `low` (noise-dominant frames) and `high` (voice-dominant frames) using RNNoise's per-frame voice probability. e.g. `0.0,0.30` = full NS on pure-noise frames, ~−10 dB cap on voice. Supersedes `--ns-dry-blend` when both are passed. |
+| `--bypass-beamformer` | — | no | DSB on | Bypass the Beamformer (use `ch[0]` verbatim). Right for mono input duplicated across channels — without it, DSB's bit-identical-channel warning fires once. |
 | `-h`, `--help` | — | no | — | Print usage and exit. |
 
 **Stats line printed at exit** (fields shown depend on what flags ran):
@@ -469,6 +471,14 @@ frames=<N>  audio=<seconds>  cpu=<seconds>  rtf=<ratio>  erle_db=<dB>  dropped=<
 
 # Step B: VAD-gated NS — full RNNoise on noise, capped on voice.
 ./build/ecnr_bench --mic ... --ref ... --out /tmp/step_b.wav --ns-vad-blend 0.0,0.30
+
+# A/B listening pair: --out is "after", --out-raw is "before" (length-aligned).
+# The bench prints the afplay pair on exit so the comparison is one paste away.
+./build/ecnr_bench --mic reference/synth/test_mic_road.wav \
+                   --ref reference/synth/ref.wav \
+                   --out /tmp/ab_after.wav \
+                   --out-raw /tmp/ab_before.wav \
+                   --ns-vad-blend 0.0,0.70 --bypass-beamformer
 
 # Parameter sweep on the short 30 s demo.
 for blend in 0.0 0.15 0.25 0.40; do

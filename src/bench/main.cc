@@ -15,6 +15,13 @@ struct Args {
   std::string mic;
   std::string ref;
   std::string out = "out.wav";
+  // Optional "before" track for A/B listening. When set, the bench writes
+  // the pre-chain mic stream (ch[0], sample-aligned with --out) to this
+  // path. Same shape as ecnr_live's --out-raw flag. The original mic.wav
+  // is usually a few samples longer than --out (the chain drops trailing
+  // partial frames); having a length-matched WAV makes direct A/B
+  // playback + visual overlay clean.
+  std::string out_raw;
   // Step A: uniform blend. 0 = unchanged RNNoise (default); 0.25 caps
   // suppression at ~-12 dB; 1 = NS bypass.
   float ns_dry_blend = 0.0f;
@@ -36,9 +43,14 @@ struct Args {
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
                "usage: %s --mic mic.wav --ref ref.wav [--out out.wav]\n"
+               "       [--out-raw before.wav]\n"
                "       [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n"
                "       [--bypass-beamformer]\n"
                "\n"
+               "  --out FILE           processed AEC+NS output (default: out.wav)\n"
+               "  --out-raw FILE       captures the pre-chain mic stream (ch[0] verbatim,\n"
+               "                       length-aligned with --out). One line of afplay\n"
+               "                       output is printed on exit when both are set.\n"
                "  --bypass-beamformer  use Beamformer passthrough (ch[0] verbatim)\n"
                "                       instead of DSB. Right for mono input duplicated\n"
                "                       across channels (no spatial information).\n",
@@ -48,11 +60,13 @@ void PrintUsage(const char* prog) {
 bool ParseArgs(int argc, char** argv, Args* a) {
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
-    if ((flag == "--mic" || flag == "--ref" || flag == "--out") && i + 1 < argc) {
+    if ((flag == "--mic" || flag == "--ref" || flag == "--out" ||
+         flag == "--out-raw") && i + 1 < argc) {
       const std::string val = argv[++i];
       if (flag == "--mic") a->mic = val;
       if (flag == "--ref") a->ref = val;
       if (flag == "--out") a->out = val;
+      if (flag == "--out-raw") a->out_raw = val;
     } else if (flag == "--ns-dry-blend" && i + 1 < argc) {
       a->ns_dry_blend = std::stof(argv[++i]);
     } else if (flag == "--ns-vad-blend" && i + 1 < argc) {
@@ -178,6 +192,11 @@ int main(int argc, char** argv) {
       static_cast<size_t>(frame_samples);
   std::vector<int16_t> processed;
   processed.reserve(total_frames * frame_samples);
+  // Optional "before" track. Captures the ch[0] mic samples the chain
+  // actually sees (post-de-interleave for multi-channel input), so that
+  // out + out_raw are guaranteed sample-aligned for direct A/B.
+  std::vector<int16_t> raw;
+  if (!args.out_raw.empty()) raw.reserve(total_frames * frame_samples);
 
   ecnr::Frame mic_f, ref_f, out_f;
   for (size_t i = 0; i < total_frames; ++i) {
@@ -210,6 +229,15 @@ int main(int argc, char** argv) {
       }
     }
 
+    // Capture the "before" frame BEFORE processing — ProcessCapture takes
+    // mic_f by const ref today, but snapshotting here keeps the raw trace
+    // decoupled from any future signature change.
+    if (!args.out_raw.empty()) {
+      raw.insert(raw.end(),
+                 mic_f.ch[0].begin(),
+                 mic_f.ch[0].begin() + frame_samples);
+    }
+
     chain.ProcessRender(ref_f);
     chain.ProcessCapture(mic_f, out_f);
     processed.insert(processed.end(), out_f.ch[0].begin(),
@@ -219,6 +247,12 @@ int main(int argc, char** argv) {
   if (!ecnr::hal::WriteWavMono(args.out, processed, sample_rate_hz, &err)) {
     std::fprintf(stderr, "write out: %s\n", err.c_str());
     return 1;
+  }
+  if (!args.out_raw.empty()) {
+    if (!ecnr::hal::WriteWavMono(args.out_raw, raw, sample_rate_hz, &err)) {
+      std::fprintf(stderr, "write out-raw: %s\n", err.c_str());
+      return 1;
+    }
   }
 
   const auto& s = chain.Stats();
@@ -249,5 +283,13 @@ int main(int argc, char** argv) {
     std::printf("  ns_dry_blend=%.3f", args.ns_dry_blend);
   }
   std::printf("\n");
+
+  // A/B convenience: when both --out and --out-raw are set, print the
+  // afplay pair so the listening test is one copy-paste away.
+  if (!args.out_raw.empty()) {
+    std::printf("A/B:  afplay %s   # before\n"
+                "      afplay %s   # after\n",
+                args.out_raw.c_str(), args.out.c_str());
+  }
   return 0;
 }
