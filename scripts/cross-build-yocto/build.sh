@@ -142,12 +142,29 @@ echo "==> sysroot=$SDKTARGETSYSROOT"
 
 cd /work
 rm -rf build-aarch64
+# Release (not RelWithDebInfo) + post-build strip is the deployment shape
+# we want on the U300 target: -O3, no debug info in the artefact,
+# symbol table dropped. The strip step is structural — it lops ~1.9 MB
+# off the binary without touching code or perf. If a developer needs
+# debug info for a local trace, swap CMAKE_BUILD_TYPE back to
+# RelWithDebInfo and skip the strip below.
 cmake -S . -B build-aarch64 \
     -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE" \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_BUILD_TYPE=Release \
     -DECNR_BUILD_LIVE=OFF
 
 cmake --build build-aarch64 --target ecnr_bench -j$(nproc)
+
+echo
+echo "==> post-build strip --strip-all"
+sz_pre=$(stat -c%s build-aarch64/ecnr_bench)
+aarch64-poky-linux-strip --strip-all build-aarch64/ecnr_bench
+sz_post=$(stat -c%s build-aarch64/ecnr_bench)
+awk -v r=$sz_pre -v s=$sz_post 'BEGIN {
+  printf "  pre-strip  : %12d B (%6.2f MB)\n", r, r/1048576
+  printf "  post-strip : %12d B (%6.2f MB)\n", s, s/1048576
+  printf "  delta      : %12d B (%6.2f MB)\n", r-s, (r-s)/1048576
+}'
 INNER
 }
 
