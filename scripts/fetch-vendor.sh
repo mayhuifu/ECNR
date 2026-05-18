@@ -100,6 +100,30 @@ post_fetch_rnnoise() {
     echo "tar extract failed for $model" >&2
     return 1
   fi
+
+  # Patch rnnoise_data.c to force the int8 inference path. Upstream
+  # passes BOTH "<layer>_weights_int8" AND "<layer>_weights_float" to
+  # linear_init for the 7 layers that have both quantisation levels;
+  # compute_linear in nnet_arch.h:138 then prefers float, leaving the
+  # int8 weights as ~2.6 MB of dead .rodata AND running ~2-3× slower
+  # on A55 (no SDOT use). Our patch passes NULL for the float-name on
+  # those 7 layers so the int8 path runs. Combined with the
+  # -DDISABLE_DEBUG_FLOAT in CMakeLists.txt this drops the binary from
+  # ~17 MB to ~4 MB and the qemu RTF from 2.10 to 0.81.
+  #
+  # The patch is idempotent: running it twice is a no-op since the
+  # second pass finds no remaining "_weights_int8","..._weights_float"
+  # adjacencies.
+  echo "       patching rnnoise_data.c to force int8 inference path"
+  if command -v gsed >/dev/null 2>&1; then
+    sed_inplace=(gsed -i -E)
+  else
+    case "$OSTYPE" in
+      darwin*) sed_inplace=(sed -i '' -E) ;;
+      *)       sed_inplace=(sed -i -E)    ;;
+    esac
+  fi
+  "${sed_inplace[@]}" 's/(_weights_int8")(,")[a-z0-9_]+_weights_float"/\1, NULL/' src/rnnoise_data.c
 }
 
 mode="${1:-all}"
