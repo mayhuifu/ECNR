@@ -117,16 +117,18 @@ Total build time on Apple Silicon under Rosetta:
 - ❌ Performance on A55 — qemu emulation adds ~5–10× overhead, so the qemu RTF is a relative baseline only, not an absolute A55 number. The U300 vendor SDK's `cortexa55` tuning + real hardware are required for absolute perf.
 - ❌ ADR-0001 §"Action items" → "measure DSB CPU on A55" — that requires real hardware. The qemu baseline below makes proportional A/B perf comparisons possible across binary-size / config experiments in the meantime.
 
-## aarch64 baseline (under qemu-aarch64-static)
+## aarch64 baseline + size/perf experiments (under qemu-aarch64-static)
 
-Captured via `build.sh --smoke` on the current `main` tip:
+Captured via `build.sh --smoke`. Each row is the current `--bench` default at that point in the work stream.
 
-| Metric | Value | Notes |
-|---|---:|---|
-| Binary as-built (`RelWithDebInfo`) | 16.84 MB | text 651 KB, rodata 14.84 MB (RNNoise weights), debug 1.73 MB |
-| Binary `--strip-all` | 14.94 MB | free −1.90 MB; no perf impact |
-| Chain RTF (qemu) | 2.25 | bench `cpu_time / audio_time` on the 30 s synthetic demo, 16 kHz, `--bypass-beamformer` |
-| ERLE (AEC3-reported, last frame) | 7.69 dB | matches host build → chain logic is preserved across cross-build |
+| Build config | Binary | RTF (qemu) | ERLE (dB) | Δ binary | Δ RTF |
+|---|---:|---:|---:|---:|---:|
+| **C (baseline)** `RelWithDebInfo`, no strip | 17.66 MB | 2.25 | 7.69 | — | — |
+| **A** `Release` + `--strip-all` | **14.94 MB** | **2.10** | 7.69 | **−2.72 MB (−15.4%)** | **−6.3%** |
+
+Caveats unchanged from above:
+- qemu RTF includes ~5–10× emulation overhead → real-A55 RTFs are expected at ~0.2–0.4× these numbers.
+- Identical ERLE across rows is the correctness guard: behaviour-preserving.
 
 Notes on the qemu RTF:
 - 2.25 = "67 s of qemu-emulated CPU to process 30 s of audio". qemu-user-static typically adds ~5–10× emulation overhead, so a real A55 would be expected around RTF 0.22–0.45 (well sub-realtime). The number is **not** A55-accurate but **is** stable enough for proportional A/B comparison across builds — what changes between two runs is attributable to the change, not the emulator.
