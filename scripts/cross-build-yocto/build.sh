@@ -173,6 +173,59 @@ fi
 INNER
 }
 
+smoke_script() {
+  # Executes the cross-built aarch64 ecnr_bench under qemu-aarch64-static
+  # against the 30 s demo input. Confirms two things:
+  #
+  #   1. The binary is runnable (not broken at the dynamic-linker or
+  #      runtime-symbol level) — closes PR #3's review item #2.
+  #
+  #   2. A reproducible baseline RTF / ERLE / runtime number for the
+  #      aarch64 chain, suitable for tracking regressions across binary-
+  #      size and perf experiments (Moves A and B in this work stream).
+  #
+  # Caveats:
+  #   - qemu-user-static emulates aarch64 user-mode; reported wall-clock
+  #     RTF includes emulation overhead and is NOT a real A55 number.
+  #     Useful as a relative metric across builds, not as an absolute.
+  #   - LD_LIBRARY_PATH points at the SDK target sysroot so the binary
+  #     can resolve aarch64 libstdc++ / libsndfile / etc. against the
+  #     glibc compiled into the SDK.
+  cat <<'INNER'
+set -euo pipefail
+cd /work
+if [[ ! -x build-aarch64/ecnr_bench ]]; then
+  echo "build-aarch64/ecnr_bench not found — run --bench first" >&2
+  exit 1
+fi
+export QEMU_LD_PREFIX="$SDKTARGETSYSROOT"
+echo "==> file build-aarch64/ecnr_bench"
+file build-aarch64/ecnr_bench
+echo
+echo "==> binary footprint (as-built vs strip --strip-all):"
+sz_raw=$(stat -c%s build-aarch64/ecnr_bench)
+cp build-aarch64/ecnr_bench /tmp/ecnr_bench_stripped
+aarch64-poky-linux-strip --strip-all /tmp/ecnr_bench_stripped
+sz_strip=$(stat -c%s /tmp/ecnr_bench_stripped)
+awk -v r=$sz_raw -v s=$sz_strip 'BEGIN {
+  printf "  as-built    : %12d B (%6.2f MB)\n", r, r/1048576
+  printf "  --strip-all : %12d B (%6.2f MB)\n", s, s/1048576
+  printf "  delta       : %12d B (%6.2f MB)\n", r-s, (r-s)/1048576
+}'
+rm -f /tmp/ecnr_bench_stripped
+echo
+echo "==> aarch64 chain smoke under qemu-aarch64-static (30 s demo, 16 kHz):"
+echo "    (bench prints its own RTF — that's the meaningful number; qemu wall-clock"
+echo "     is RTF × emulation overhead, useful only as a relative baseline.)"
+echo
+qemu-aarch64-static build-aarch64/ecnr_bench \
+    --mic reference/synth/demo_30s_mic.wav \
+    --ref reference/synth/demo_30s_ref.wav \
+    --out /tmp/smoke_out.wav \
+    --bypass-beamformer
+INNER
+}
+
 case "$mode" in
   build)
     build_image
@@ -193,6 +246,10 @@ case "$mode" in
   --verify)
     run_in_container "$(verify_script)"
     ;;
+  --smoke)
+    build_image
+    run_in_container "$(smoke_script)"
+    ;;
   --shell)
     build_image
     docker run --rm -it \
@@ -203,7 +260,7 @@ case "$mode" in
       "$IMAGE_NAME"
     ;;
   *)
-    echo "usage: $0 [build|--image|--deps|--bench|--verify|--shell]"
+    echo "usage: $0 [build|--image|--deps|--bench|--verify|--smoke|--shell]"
     exit 2
     ;;
 esac

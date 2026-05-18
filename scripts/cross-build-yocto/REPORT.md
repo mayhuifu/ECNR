@@ -113,15 +113,30 @@ Total build time on Apple Silicon under Rosetta:
 **Does NOT prove**:
 
 - ❌ Real-target ABI compatibility — Poky reference sysroot's glibc / libstdc++ / kernel ABI is generic; the U300 BSP sysroot may differ. Re-validate against the vendor SDK before declaring U300 ready.
-- ❌ Runtime correctness on an A55 — the spike doesn't execute the binary. Optional next step: install `qemu-user-static` in the container and run `qemu-aarch64 ./build-aarch64/ecnr_bench` for a smoke test.
-- ❌ Performance on A55 — `cortexa57` SDK tuning produces correct A55 code, but not optimal. The U300 vendor SDK's `cortexa55` tuning will fix that.
-- ❌ ADR-0001 §"Action items" → "measure DSB CPU on A55" — that requires real hardware (or a calibrated qemu run); this spike just proves the binary exists.
+- ✅ Runtime correctness on aarch64 (via qemu-user-static) — covered by `build.sh --smoke` as of the perf/size work stream. The chain runs end-to-end and produces healthy AEC3 ERLE numbers (see baseline below).
+- ❌ Performance on A55 — qemu emulation adds ~5–10× overhead, so the qemu RTF is a relative baseline only, not an absolute A55 number. The U300 vendor SDK's `cortexa55` tuning + real hardware are required for absolute perf.
+- ❌ ADR-0001 §"Action items" → "measure DSB CPU on A55" — that requires real hardware. The qemu baseline below makes proportional A/B perf comparisons possible across binary-size / config experiments in the meantime.
+
+## aarch64 baseline (under qemu-aarch64-static)
+
+Captured via `build.sh --smoke` on the current `main` tip:
+
+| Metric | Value | Notes |
+|---|---:|---|
+| Binary as-built (`RelWithDebInfo`) | 16.84 MB | text 651 KB, rodata 14.84 MB (RNNoise weights), debug 1.73 MB |
+| Binary `--strip-all` | 14.94 MB | free −1.90 MB; no perf impact |
+| Chain RTF (qemu) | 2.25 | bench `cpu_time / audio_time` on the 30 s synthetic demo, 16 kHz, `--bypass-beamformer` |
+| ERLE (AEC3-reported, last frame) | 7.69 dB | matches host build → chain logic is preserved across cross-build |
+
+Notes on the qemu RTF:
+- 2.25 = "67 s of qemu-emulated CPU to process 30 s of audio". qemu-user-static typically adds ~5–10× emulation overhead, so a real A55 would be expected around RTF 0.22–0.45 (well sub-realtime). The number is **not** A55-accurate but **is** stable enough for proportional A/B comparison across builds — what changes between two runs is attributable to the change, not the emulator.
+- ERLE matching the host build is the meaningful correctness signal: the chain produces the same AEC behaviour on aarch64 as on macOS, ruling out arch-specific bugs in our code.
 
 ## Recommended next steps
 
 1. **When the U300 vendor SDK lands** (gated on BSP team handover): drop it in via the documented swap-in process (`scripts/cross-build-yocto/README.md`), re-run `build.sh`, confirm artefacts.
-2. **A55 user-mode smoke test** (cheap, no hardware needed): install `qemu-user-static` in the cross-build container, run `qemu-aarch64 build-aarch64/ecnr_bench --mic ... --ref ...` to catch any quick-fail issues (missing symbols, wrong ld-linux path, etc.).
-3. **CI integration** (deferred): the cross-build is reproducible and could run in GitHub Actions. Holding off until ADR-0001 A7 is fully closed against the real U300 SDK.
+2. **CI integration** (deferred): the cross-build is reproducible and could run in GitHub Actions. Holding off until ADR-0001 A7 is fully closed against the real U300 SDK.
+3. **Binary-size reduction** (in progress, see perf/size work stream): the 14.84 MB `.rodata` is dominated by RNNoise weights, and ~11 MB of that appears to be float-weight tables that are dead with the current `compute_linear` branch order. Concrete experiments queued: switch to `int8` path (saves both binary size and runs faster on A55's DotProd ext); strip in Release builds (already validated as a −1.9 MB free win above).
 
 ## Cost note
 

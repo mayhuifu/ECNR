@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake meson ninja-build \
         build-essential file git curl ca-certificates xz-utils \
         python3 python3-pip python3-pkg-resources \
+        qemu-user-static \
     && rm -rf /var/lib/apt/lists/*
 
 # Download + install the Yocto reference SDK. The installer is ~300 MB
