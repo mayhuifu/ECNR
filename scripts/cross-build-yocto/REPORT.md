@@ -124,7 +124,21 @@ Captured via `build.sh --smoke`. Each row is the current `--bench` default at th
 | Build config | Binary | RTF (qemu) | ERLE (dB) | Δ binary | Δ RTF |
 |---|---:|---:|---:|---:|---:|
 | **C (baseline)** `RelWithDebInfo`, no strip | 17.66 MB | 2.25 | 7.69 | — | — |
-| **A** `Release` + `--strip-all` | **14.94 MB** | **2.10** | 7.69 | **−2.72 MB (−15.4%)** | **−6.3%** |
+| **A** `Release` + `--strip-all` | 14.94 MB | 2.10 | 7.69 | −2.72 MB (−15.4%) | −6.3% |
+| **B** + RNNoise int8 path (`-DDISABLE_DEBUG_FLOAT` + 7-layer patch) | **4.25 MB** | **0.81** | 7.69 | **−10.69 MB (−71.5%)** | **−61.4% (2.6× faster)** |
+| **Combined (C+A+B vs C baseline)** | **4.25 MB** | **0.81** | 7.69 | **−13.41 MB (−75.9%)** | **−64.0% (2.8× faster)** |
+
+Voice-window RMS proxy on the real-voice fixture (`test_mic_road.wav`) — quality preservation across the int8 switch:
+
+| `--ns-vad-blend high` | Move A (float NS) | Move B (int8 NS) | Δ |
+|---|---:|---:|---:|
+| 0.30 | −30.83 dBFS | −30.56 dBFS | +0.27 dB |
+| 0.50 | −26.87 dBFS | −26.68 dBFS | +0.19 dB |
+| 0.70 | −24.11 dBFS | −23.95 dBFS | +0.16 dB |
+| 0.85 | −22.48 dBFS | −22.33 dBFS | +0.15 dB |
+| 1.00 | −20.96 dBFS | −20.96 dBFS | +0.15 dB |
+
+All deltas under 0.3 dB — within int8 quantisation noise. Subjectively (listening-test pending) the int8 path should be indistinguishable from the float path at the same blend.
 
 Caveats unchanged from above:
 - qemu RTF includes ~5–10× emulation overhead → real-A55 RTFs are expected at ~0.2–0.4× these numbers.

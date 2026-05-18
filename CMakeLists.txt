@@ -61,6 +61,22 @@ target_include_directories(ecnr_rnnoise PUBLIC
 set_target_properties(ecnr_rnnoise PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Quiet upstream-only warnings without weakening our project warnings.
 target_compile_options(ecnr_rnnoise PRIVATE -Wno-unused-function -Wno-sign-compare)
+# DISABLE_DEBUG_FLOAT drops the 7 redundant float-weight arrays from
+# rnnoise_data.c that are duplicates of the int8 versions also baked in.
+# We've patched init_rnnoise() in rnnoise_data.c to pass NULL for the
+# float-weight names of those 7 layers (forcing compute_linear to take
+# the int8 path), so the float data is dead bytes. -DDISABLE_DEBUG_FLOAT
+# tells the upstream-generated file not to define them at all.
+#
+# Result on aarch64: -11 MB binary (.rodata drops from 14.8 MB to ~4 MB)
+# + RNNoise runs the int8 path (sparse_cgemv8x4 — faster + 1/4 memory
+# bandwidth vs sgemv on the GRU forward pass; on A55 with the DotProd
+# extension this is also where NEON SDOT helps).
+#
+# Layers preserved as float-only (conv1, dense_out, vad_dense): their
+# float weights live OUTSIDE the DISABLE_DEBUG_FLOAT block in
+# rnnoise_data.c and are untouched.
+target_compile_definitions(ecnr_rnnoise PRIVATE DISABLE_DEBUG_FLOAT)
 
 # --- googletest -----------------------------------------------------------------
 FetchContent_Declare(
