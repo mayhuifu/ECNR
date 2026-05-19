@@ -446,6 +446,7 @@ Replays a `--mic` WAV through the AEC + NS chain using a paired `--ref` WAV as t
 | `--ns-dry-blend` | `<0..1>` | no | `0.0` | **Step A NS cap.** Uniform wet/dry mix on RNNoise's output: `final = α·input + (1−α)·rnnoise_out`. `0.0` = unchanged RNNoise; `0.25` ≈ −12 dB suppression floor; `1.0` = NS bypass. Mitigates chopped-voice artifact on heavy noise. |
 | `--ns-vad-blend` | `<low,high>` | no | unset | **Step B VAD-gated NS cap.** Interpolates α between `low` (noise-dominant frames) and `high` (voice-dominant frames) using RNNoise's per-frame voice probability. e.g. `0.0,0.30` = full NS on pure-noise frames, ~−10 dB cap on voice. Supersedes `--ns-dry-blend` when both are passed. |
 | `--bypass-beamformer` | — | no | DSB on | Bypass the Beamformer (use `ch[0]` verbatim). Right for mono input duplicated across channels — without it, DSB's bit-identical-channel warning fires once. |
+| `--agc` | — | no | AGC off | Enable the post-NS AGC2 stage (ADR-0001 architecture). Normalises output to ~−21 dBFS RMS, inside the 3GPP TS 26.131 hands-free SLR target band. Adds ~0.002 to RTF; ERLE unchanged. Off by default for regression-comparison parity with pre-AGC bench runs. |
 | `-h`, `--help` | — | no | — | Print usage and exit. |
 
 **Stats line printed at exit** (fields shown depend on what flags ran):

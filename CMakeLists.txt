@@ -98,6 +98,7 @@ target_include_directories(ecnr_core PUBLIC src)
 add_library(ecnr_pipeline STATIC
   src/pipeline/aec_chain.cc
   src/pipeline/aec3_adapter.cc
+  src/pipeline/agc2_adapter.cc
   src/pipeline/beamformer.cc
   src/pipeline/rnnoise_adapter.cc
 )
