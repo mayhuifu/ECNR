@@ -47,13 +47,37 @@ The source research is primarily *cellular* (VoLTE/VoNR). The following must be 
 |---|---|---|
 | **0. Bootstrap** | Project doc + vendor manifest + scaffold with **stub** AEC/NS backends + green smoke test on dev host | Done |
 | **0.5 Backend wiring** | Real WebRTC AEC3 + RNNoise wired behind the existing `AecChain` interface; multi-rate (16/48 kHz) and 2–8 mic support via a stub `Beamformer` (per ADR-0003 + ADR-0004); ERLE assertion tightened to > 15 dB on the synthetic correlated-echo test (measured ~64 dB at 16 k / ~62 dB at 48 k); RTF ~0.06 on macOS Apple Silicon. | Done |
-| **0.6 Host live E2E** | `ecnr_live` binary using miniaudio: play stimulus through Mac speakers, capture from mac mic, run AecChain live, write recovered output + report measured ERLE. Cross-platform-ready (Mac/Linux/Windows). | Next |
-| 1. Baseline tier on A55 | Cross-compile, productize WebRTC AEC3 + RNNoise, A/B vs reference set | |
+| **0.6 Host live E2E** | `ecnr_live` binary using miniaudio: play stimulus through Mac speakers, capture from mac mic, run AecChain live, write recovered output + report measured ERLE. Cross-platform-ready (Mac/Linux/Windows). | Done |
+| **1. Baseline tier on A55** | Cross-compile, productize WebRTC AEC3 + RNNoise, A/B vs reference set | **In flight (current)** — see status below |
 | 2. Cabin characterization | Measure cabin IR; build road/wind/HVAC + double-talk reference corpus | Vehicle access required |
 | 3. Hybrid v1 | Integrate **NKF-AEC** (5.3K params, RTF 0.09) or **DTLN-AEC** as neural RES post-filter | Verify licenses first |
 | 4. Mode controller + DVFS | Activity-based depth switching; power profiling | |
 | 5. Field validation | In-vehicle regression suite; productization gates | |
 | 6. DSP offload (optional) | Migrate linear AEC to HiFi C1/BX2; A55 hosts NN post-filter only | Decision deferred |
+
+### Phase 1 status (current: 2026-05-19, tag `v0.2`)
+
+What's **landed**:
+
+- ✅ DSB beamformer + `MicGeometry` ([ADR-0010](docs/adr/0010-mic-geometry-and-beamforming.md), tag `v0.1`)
+- ✅ Cross-compile to aarch64-poky-linux via Yocto SDK in Docker ([ADR-0001 A7](docs/adr/0001-hybrid-aec-architecture-review.md), `scripts/cross-build-yocto/`)
+- ✅ Cross-build aarch64 perf + size optimization (qemu smoke, Release + strip, RNNoise int8 path — 17.7 MB → 4.25 MB, 2.8× faster, tag `v0.2`)
+- ✅ AEC3 tuning methodology + `ecnr_eval` harness ([ADR-0011](docs/adr/0011-aec3-tuning-methodology.md), v0.1)
+- ✅ NS over-suppression mitigations — Steps A + B (`--ns-dry-blend`, `--ns-vad-blend`)
+- ✅ Multi-rate (16 / 48 kHz) + multi-mic (2..8) contract via `Frame` (Phase 0.5, ADRs 0003 + 0004)
+- ✅ Bench `--out-raw` for sample-aligned A/B listening
+
+What's **remaining** in Phase 1 before declaring closeout:
+
+- ⏳ **AGC stage** — chain currently outputs at −38 to −42 dBFS vs 3GPP target −20 to −16 (see Known limitations below). WebRTC AGC2 flag-flip; ~half-day.
+- ⏳ **A/B vs reference set** — `ecnr_eval --run` works against any condition tree, but the Phase 1 deliverable was "A/B vs reference set" and we haven't published a formal Phase-1 reference run yet.
+- ⏳ **Listening verdict on Move B (int8 RNNoise NS path)** — quantitative voice-RMS deltas are <0.3 dB across blends, but perceptual A/B is still queued.
+- ⏳ **TOML sweep parser for `ecnr_eval`** — locks `config_hash` / `condition_hash` columns per ADR-0011 §4.
+
+What's **blocked on external inputs** (Phase 1 cannot fully close until these):
+
+- 🚧 Real A55 hardware OR the U300 vendor SDK — current cross-build runs against a stand-in Poky reference SDK and measures perf under qemu (≈5–10× overhead). The "measure DSB CPU on A55" action item from [ADR-0001 A7](docs/adr/0001-hybrid-aec-architecture-review.md) needs one of these to close.
+- 🚧 Phase 2 cabin recordings — required for Step C (AEC3 per-condition tuning) and ADR-0012 (near-end damage metric). Both are gated on Phase 2, which is itself gated on vehicle access.
 
 ## Vendored open-source dependencies
 
