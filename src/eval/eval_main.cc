@@ -56,19 +56,25 @@ struct Args {
   bool run = false;
   std::string conditions_dir;
   std::string out_csv;
+  std::string out_wavs_dir;  // optional; if set, write per-condition output WAVs here
+  bool agc_enabled = false;  // optional post-NS AGC2 (mirrors ecnr_bench --agc)
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
       "usage: %s --self-test\n"
-      "       %s --run --conditions DIR --out FILE.csv\n"
+      "       %s --run --conditions DIR --out FILE.csv [--out-wavs WAV_DIR]\n"
       "\n"
       "  --self-test           in-memory synthetic fixture; asserts ERLE looks healthy.\n"
       "                        No file I/O. Used as CI smoke + harness hello-world.\n"
       "  --run                 iterate condition subdirs and emit a CSV per ADR-0011 §4.\n"
       "  --conditions DIR      root of the condition tree. Each direct subdir must contain\n"
       "                        mic.wav, ref.wav, echo_only_mic.wav (all same rate + length).\n"
-      "  --out FILE.csv        results path. Overwritten without prompt.\n",
+      "  --out FILE.csv        results path. Overwritten without prompt.\n"
+      "  --out-wavs WAV_DIR    optional. When set, writes per-condition chain output\n"
+      "                        as WAV_DIR/<condition_id>.wav (mic-pass A residual).\n"
+      "                        Required for downstream DNSMOS / AECMOS scoring via\n"
+      "                        reference/score_mos.py.\n",
       prog, prog);
 }
 
@@ -79,6 +85,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--run") a->run = true;
     else if (flag == "--conditions" && i + 1 < argc) a->conditions_dir = argv[++i];
     else if (flag == "--out" && i + 1 < argc) a->out_csv = argv[++i];
+    else if (flag == "--out-wavs" && i + 1 < argc) a->out_wavs_dir = argv[++i];
+    else if (flag == "--agc") a->agc_enabled = true;
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
   }
@@ -122,7 +130,8 @@ struct ChainRunResult {
 
 ChainRunResult RunChain(const std::vector<int16_t>& ref,
                         const std::vector<int16_t>& capture,
-                        int sample_rate_hz, int num_mics) {
+                        int sample_rate_hz, int num_mics,
+                        bool agc_enabled = false) {
   const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
   ecnr::AecChain chain;
   // Passthrough geometry — we don't care about beamforming for ERLE.
@@ -133,6 +142,7 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
                  sample_rate_hz, num_mics);
     return {};
   }
+  chain.SetAgcEnabled(agc_enabled);
 
   const size_t n_frames =
       std::min(ref.size(), capture.size()) /
@@ -324,7 +334,8 @@ bool LoadCondition(const std::filesystem::path& dir, Condition* c,
   return true;
 }
 
-int RunSweep(const std::string& conditions_dir, const std::string& out_csv) {
+int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
+             const std::string& out_wavs_dir, bool agc_enabled) {
   namespace fs = std::filesystem;
   std::error_code ec;
   if (!fs::is_directory(conditions_dir, ec)) {
@@ -370,9 +381,24 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv) {
 
     // Pass A: production-style run on the mixed mic, capture per-frame
     // reported ERLE.
-    auto run_a = RunChain(cond.ref, cond.mic, cond.sample_rate_hz, /*num_mics=*/2);
+    auto run_a = RunChain(cond.ref, cond.mic, cond.sample_rate_hz,
+                          /*num_mics=*/2, agc_enabled);
     const auto reported =
         AggregatePercentiles(run_a.reported_erle_db_per_frame, kSettleFrames);
+
+    // Optionally emit the per-condition chain output WAV. Consumed by
+    // reference/score_mos.py to produce DNSMOS / AECMOS scores per
+    // ADR-0012 §4 workflow.
+    if (!out_wavs_dir.empty()) {
+      std::string emsg;
+      const fs::path out_wav_path = fs::path(out_wavs_dir) / (cond.id + ".wav");
+      fs::create_directories(out_wav_path.parent_path(), ec);
+      if (!ecnr::hal::WriteWavMono(out_wav_path.string(), run_a.residual,
+                                    cond.sample_rate_hz, &emsg)) {
+        std::fprintf(stderr, "WARN: failed to write %s: %s\n",
+                     out_wav_path.string().c_str(), emsg.c_str());
+      }
+    }
 
     // Pass B: echo-only run, fresh chain instance, capture residual for
     // true-ERLE.
@@ -414,5 +440,6 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (args.self_test) return RunSelfTest();
-  return RunSweep(args.conditions_dir, args.out_csv);
+  return RunSweep(args.conditions_dir, args.out_csv, args.out_wavs_dir,
+                  args.agc_enabled);
 }

@@ -60,20 +60,43 @@ except ImportError:
     print("score_mos.py requires onnxruntime. Install via: pip install onnxruntime", file=sys.stderr)
     sys.exit(2)
 
+# librosa is required ONLY for AECMOS (its mel-spectrogram pipeline matches
+# the reference impl bit-for-bit). DNSMOS uses scipy-only STFT, so the
+# import is deferred to the first AECMOS call to keep the DNSMOS-only path
+# free of the librosa dependency.
+_librosa = None
+def _ensure_librosa():
+    global _librosa
+    if _librosa is None:
+        try:
+            import librosa  # type: ignore
+            _librosa = librosa
+        except ImportError:
+            print("AECMOS scoring requires librosa. Install via: pip install librosa",
+                  file=sys.stderr)
+            sys.exit(2)
+    return _librosa
+
 
 # ---- DNSMOS P.835 ------------------------------------------------------------
-# Reference: github.com/microsoft/DNS-Challenge/tree/master/DNSMOS
+# Reference: github.com/microsoft/DNS-Challenge/blob/master/DNSMOS/dnsmos_local.py
 #
-# Input: 16 kHz mono audio, ≥9 s. Shorter clips are tile-padded; longer are
-# windowed at 9 s with 1-s hop and the mean of per-window predictions is
-# reported. Feature: log-magnitude STFT with n_fft=320, hop=160 (10 ms hop
-# at 16 kHz), magnitude only. Model output: 3 floats per inference —
-# SIG, BAK, OVRL — already on the 1-5 MOS scale.
+# Input: RAW 16 kHz mono audio of exactly INPUT_LENGTH seconds (9.01 s →
+# 144160 samples). Model accepts shape (1, N) — a 2-D batch of raw audio.
+# Output: 3 floats per inference (raw SIG, BAK, OVRL) which are then
+# polynomial-calibrated to 1-5 MOS scale via get_polyfit_val below.
+# (Reference confusingly calls the feature pipeline `audio_melspec` but
+# that's only used by the secondary P.808 model, NOT sig_bak_ovr.onnx.)
 
 DNSMOS_FS = 16000
-DNSMOS_FRAME = 320  # n_fft
-DNSMOS_HOP = 160    # hop = 10 ms @ 16 kHz
-DNSMOS_WINDOW_S = 9.0
+DNSMOS_WINDOW_S = 9.01
+DNSMOS_INPUT_LEN = int(DNSMOS_FS * DNSMOS_WINDOW_S)  # 144160 samples
+
+# Polynomial calibration coefficients for the non-personalized P.835 head,
+# lifted verbatim from get_polyfit_val() in dnsmos_local.py.
+_DNSMOS_P_SIG = [-0.08397278,  1.22083953,  0.0052439]
+_DNSMOS_P_BAK = [-0.13166888,  1.60915514, -0.39604546]
+_DNSMOS_P_OVR = [-0.06766283,  1.11546468,  0.04602535]
 
 
 def _resample_to_16k(x: np.ndarray, fs: int) -> np.ndarray:
@@ -105,65 +128,129 @@ def _read_mono_float(path: Path) -> tuple[np.ndarray, int]:
     return x, fs
 
 
-def _log_stft_magnitude(x: np.ndarray) -> np.ndarray:
-    """Log-magnitude STFT compatible with the DNSMOS P.835 input pipeline."""
-    f, t, Z = signal.stft(
-        x,
-        fs=DNSMOS_FS,
-        nperseg=DNSMOS_FRAME,
-        noverlap=DNSMOS_FRAME - DNSMOS_HOP,
-        nfft=DNSMOS_FRAME,
-        boundary=None,
-        padded=False,
-        return_onesided=True,
-    )
-    mag = np.abs(Z).astype(np.float32)
-    # DNSMOS uses log(mag + tiny epsilon) to keep silent windows finite.
-    return np.log(mag + 1e-7)
+def _dnsmos_polyfit(sig: float, bak: float, ovr: float) -> tuple[float, float, float]:
+    """Apply the non-personalized P.835 polynomial calibration. Maps raw
+    model outputs to the calibrated 1-5 MOS scale."""
+    return (float(np.polyval(_DNSMOS_P_SIG, sig)),
+            float(np.polyval(_DNSMOS_P_BAK, bak)),
+            float(np.polyval(_DNSMOS_P_OVR, ovr)))
 
 
 def score_dnsmos_p835(audio: np.ndarray, fs: int, session: ort.InferenceSession) -> tuple[float, float, float]:
-    """Run DNSMOS P.835 on a single audio clip; return (SIG, BAK, OVRL)."""
+    """Run DNSMOS P.835 on a single audio clip; return calibrated (SIG, BAK, OVRL)."""
     x = _resample_to_16k(audio, fs)
-    n_min = int(DNSMOS_WINDOW_S * DNSMOS_FS)
-    if x.size < n_min:
-        # Tile-pad short clips to 9 s — the standard DNSMOS reference fallback.
-        x = np.tile(x, int(np.ceil(n_min / x.size)))[:n_min]
-    # Single-window scoring (use 9 s of the centre of the clip). Longer
-    # clips are not multi-window-averaged here for simplicity; the central
-    # 9 s typically dominates the MOS for a steady-state condition. If
-    # multi-window averaging is needed later, hop by 1 s and mean.
-    centre = max(0, (x.size - n_min) // 2)
-    win = x[centre : centre + n_min]
-    feat = _log_stft_magnitude(win)  # shape: (n_freq, n_time)
-    # Match DNSMOS input shape: (1, n_freq, n_time, 1) — channel-last 4D.
-    feat = feat[np.newaxis, :, :, np.newaxis].astype(np.float32)
-    # Input name is model-specific; the published DNSMOS model uses "input_1".
+    # Pad / truncate to exactly INPUT_LENGTH = 9.01 s of 16 kHz audio.
+    # Tile-pad short clips (DNSMOS reference fallback); centre-crop long ones.
+    if x.size < DNSMOS_INPUT_LEN:
+        x = np.tile(x, int(np.ceil(DNSMOS_INPUT_LEN / x.size)))[:DNSMOS_INPUT_LEN]
+    else:
+        centre = (x.size - DNSMOS_INPUT_LEN) // 2
+        x = x[centre : centre + DNSMOS_INPUT_LEN]
+    # Model input shape: (1, N) — batch dim + raw audio dim.
+    feat = x[np.newaxis, :].astype(np.float32)
     in_name = session.get_inputs()[0].name
     out = session.run(None, {in_name: feat})
-    # Output order in the published sig_bak_ovr.onnx model: [SIG, BAK, OVRL].
-    sig, bak, ovrl = (float(v) for v in np.array(out[0]).reshape(-1)[:3])
-    return sig, bak, ovrl
+    # Raw model outputs: 3 floats in [SIG, BAK, OVR] order.
+    raw_sig, raw_bak, raw_ovr = (float(v) for v in np.array(out[0]).reshape(-1)[:3])
+    # Polynomial-calibrate to 1-5 MOS.
+    return _dnsmos_polyfit(raw_sig, raw_bak, raw_ovr)
 
 
 # ---- AECMOS ------------------------------------------------------------------
-# Reference: github.com/microsoft/AEC-Challenge/tree/main/AECMOS
+# Reference: github.com/microsoft/AEC-Challenge/tree/main/AECMOS/AECMOS_local
 #
-# AECMOS takes 3 audio streams (lpb / mic / enhanced) and emits 3 MOS scores
-# (echo / other / doubletalk). Its specific feature pipeline depends on the
-# released model version and is more involved than DNSMOS. We scaffold here
-# without implementing the inference: when --aecmos-model is supplied, the
-# script emits placeholder zeros + a one-line warning explaining how to
-# complete the integration.
+# AECMOS takes 3 audio streams (lpb / mic / enhanced) and emits 2 MOS scores
+# under a "talk_type" scenario marker (st / nst / dt). For our chain output
+# we always score under talk_type='dt' (doubletalk) which is the worst case
+# the chain has to handle. Outputs:
 #
-# To wire it up: read AECMOS-Challenge's `AECMOS_local.py` for the exact
-# feature pipeline of the specific ONNX checkpoint chosen, then implement
-# in score_aecmos() below.
+#   echo_mos  → ADR-0012 aecmos_echo column (residual echo perception)
+#   deg_mos   → ADR-0012 aecmos_other column (near-end damage)
+#   (avg)     → ADR-0012 aecmos_dt column (combined doubletalk handling;
+#               mean of echo_mos and deg_mos. The AECMOS model itself
+#               doesn't emit a separate "doubletalk overall" score, so
+#               we synthesize one via mean; documented in the README.)
+#
+# Implementation ported from
+# https://github.com/microsoft/AEC-Challenge/blob/main/AECMOS/AECMOS_local/aecmos.py
+# Model config matches "Run_1663915512_Stage_0" specifically:
+#   - 16 kHz, dft_size=512, hop=256, n_mels=160, log-power mel-spectrogram
+#   - GRU hidden state h0 of shape (4, 1, 64)
+#   - Needs scenario marker (st/nst/dt encoded as 2 binary tail planes)
 
-def score_aecmos_stub(*_args, **_kwargs) -> tuple[float, float, float]:
-    """AECMOS placeholder. Returns NaN for echo/other/doubletalk."""
-    nan = float("nan")
-    return nan, nan, nan
+AECMOS_SR = 16000
+AECMOS_DFT = 512
+AECMOS_HOP = 256
+AECMOS_N_MELS = 160
+AECMOS_MAX_LEN_S = 20  # clip duration cap (matches reference)
+AECMOS_HIDDEN = (4, 1, 64)
+
+
+def _aecmos_mel_transform(sample: np.ndarray) -> np.ndarray:
+    """Mel-spectrogram pipeline matching the AECMOS reference impl.
+
+    Returns shape (n_time, n_mels). Equivalent to:
+        mel = librosa.feature.melspectrogram(y=sample, sr=16000,
+              n_fft=513, hop_length=256, n_mels=160)
+        mel = (librosa.power_to_db(mel, ref=np.max) + 40) / 40
+        return mel.T
+    """
+    librosa = _ensure_librosa()
+    mel = librosa.feature.melspectrogram(
+        y=sample, sr=AECMOS_SR,
+        n_fft=AECMOS_DFT + 1,           # 513 per reference (off-by-one intentional)
+        hop_length=AECMOS_HOP,
+        n_mels=AECMOS_N_MELS,
+    )
+    mel_db = (librosa.power_to_db(mel, ref=np.max) + 40) / 40
+    return mel_db.T.astype(np.float32)
+
+
+def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
+                     fs: int, session: ort.InferenceSession) -> tuple[float, float, float]:
+    """Run AECMOS under talk_type='dt'. Returns (echo_mos, other_mos, dt_combined)."""
+    # Resample to 16 kHz if needed (chain emits 16 kHz today, but be safe).
+    if fs != AECMOS_SR:
+        lpb = _resample_to_16k(lpb, fs)
+        mic = _resample_to_16k(mic, fs)
+        enh = _resample_to_16k(enh, fs)
+    # Match lengths to the shortest signal.
+    n = min(len(lpb), len(mic), len(enh))
+    lpb, mic, enh = lpb[:n], mic[:n], enh[:n]
+    # Clip to max-len if too long.
+    n_cap = AECMOS_MAX_LEN_S * AECMOS_SR
+    if n > n_cap:
+        lpb, mic, enh = lpb[:n_cap], mic[:n_cap], enh[:n_cap]
+
+    # Mel features.
+    lpb_f = _aecmos_mel_transform(lpb)
+    mic_f = _aecmos_mel_transform(mic)
+    enh_f = _aecmos_mel_transform(enh)
+
+    # Scenario marker for talk_type='dt': two 20-row planes appended to
+    # the time axis. (1 - fe_st), (1 - ne_st) where for dt both are 0.
+    n_mels = mic_f.shape[1]
+    mic_f = np.concatenate((mic_f,
+                             np.ones((20, n_mels), dtype=np.float32),
+                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
+    lpb_f = np.concatenate((lpb_f,
+                             np.ones((20, n_mels), dtype=np.float32),
+                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
+    enh_f = np.concatenate((enh_f,
+                             np.ones((20, n_mels), dtype=np.float32),
+                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
+
+    # Stack channel-first: (1, 3, n_time, n_mels).
+    feats = np.stack((lpb_f, mic_f, enh_f)).astype(np.float32)
+    feats = np.expand_dims(feats, axis=0)
+    h0 = np.zeros(AECMOS_HIDDEN, dtype=np.float32)
+
+    in_name = session.get_inputs()[0].name
+    result = session.run([], {in_name: feats, "h0": h0})
+    echo_mos = float(result[0][0])
+    deg_mos = float(result[0][1])
+    dt_combined = 0.5 * (echo_mos + deg_mos)
+    return echo_mos, deg_mos, dt_combined
 
 
 # ---- Main --------------------------------------------------------------------
@@ -200,25 +287,22 @@ def main() -> int:
                                             providers=["CPUExecutionProvider"])
     else:
         print("WARN: --dnsmos-model unset; dnsmos_* columns will be NaN.", file=sys.stderr)
-    if args.aecmos_model is not None and not args.aecmos_model.exists():
-        print(f"--aecmos-model not found: {args.aecmos_model}", file=sys.stderr)
-        return 1
-    if args.aecmos_model is None:
-        print("WARN: --aecmos-model unset; aecmos_* columns will be NaN.", file=sys.stderr)
+    aecmos_sess = None
+    if args.aecmos_model is not None:
+        if not args.aecmos_model.exists():
+            print(f"--aecmos-model not found: {args.aecmos_model}", file=sys.stderr)
+            return 1
+        aecmos_sess = ort.InferenceSession(str(args.aecmos_model),
+                                            providers=["CPUExecutionProvider"])
     else:
-        # The script structurally accepts the model path for forward
-        # compatibility, but the inference pipeline isn't implemented yet
-        # (see score_aecmos_stub docstring). Warn loudly so the user knows
-        # the column will still be NaN despite the model path being set.
-        print("WARN: --aecmos-model received but AECMOS inference is not "
-              "implemented yet — see score_mos.py module docstring. "
-              "aecmos_* columns will be NaN.", file=sys.stderr)
+        print("WARN: --aecmos-model unset; aecmos_* columns will be NaN.", file=sys.stderr)
 
     extra_cols = ["dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
                   "aecmos_echo", "aecmos_other", "aecmos_dt"]
 
     n_rows = 0
     n_scored_dnsmos = 0
+    n_scored_aecmos = 0
     with open(args.in_csv, newline="") as fin, open(args.out_csv, "w", newline="") as fout:
         reader = csv.DictReader(fin)
         if reader.fieldnames is None:
@@ -231,8 +315,12 @@ def main() -> int:
             n_rows += 1
             cid = row.get("condition_id", "")
             out_wav = args.out_wavs / f"{cid}.wav"
-            # DNSMOS scores the chain OUTPUT (the enhanced signal) — that's
-            # the speech the receiver hears.
+            cond_dir = args.conditions / cid
+            mic_wav = cond_dir / "mic.wav"
+            ref_wav = cond_dir / "ref.wav"
+
+            # DNSMOS scores the chain OUTPUT alone (perceptual quality of
+            # what the receiver hears).
             dn_sig = dn_bak = dn_ovrl = float("nan")
             if dnsmos_sess is not None and out_wav.exists():
                 try:
@@ -244,9 +332,39 @@ def main() -> int:
             elif dnsmos_sess is not None:
                 print(f"WARN: missing chain output for condition {cid}: {out_wav}",
                       file=sys.stderr)
-            # AECMOS stub — currently always NaN. See module docstring for
-            # how to complete the integration once a specific model is pinned.
-            ae_echo, ae_other, ae_dt = score_aecmos_stub()
+
+            # AECMOS scores the chain under talk_type='dt' (doubletalk).
+            # Requires the matching mic + ref WAVs from the condition dir
+            # plus the chain output. Maps to ADR-0012 columns:
+            #   aecmos_echo  ← echo_mos
+            #   aecmos_other ← deg_mos
+            #   aecmos_dt    ← mean(echo_mos, deg_mos) — synthesized
+            #                  combined doubletalk score; the AECMOS model
+            #                  doesn't emit one natively.
+            ae_echo = ae_other = ae_dt = float("nan")
+            if aecmos_sess is not None and out_wav.exists() and mic_wav.exists() and ref_wav.exists():
+                try:
+                    mic_sig, fs_mic = _read_mono_float(mic_wav)
+                    ref_sig, fs_ref = _read_mono_float(ref_wav)
+                    enh_sig, fs_enh = _read_mono_float(out_wav)
+                    if not (fs_mic == fs_ref == fs_enh):
+                        print(f"WARN: AECMOS sample-rate mismatch on {cid} "
+                              f"(mic={fs_mic} ref={fs_ref} enh={fs_enh})",
+                              file=sys.stderr)
+                    else:
+                        ae_echo, ae_other, ae_dt = score_aecmos_dt(
+                            ref_sig, mic_sig, enh_sig, fs_mic, aecmos_sess)
+                        n_scored_aecmos += 1
+                except Exception as e:  # noqa: BLE001
+                    print(f"WARN: AECMOS failed on {cid}: {e}", file=sys.stderr)
+            elif aecmos_sess is not None:
+                missing = []
+                if not out_wav.exists(): missing.append("output")
+                if not mic_wav.exists(): missing.append("mic")
+                if not ref_wav.exists(): missing.append("ref")
+                print(f"WARN: AECMOS skipped on {cid} (missing: {','.join(missing)})",
+                      file=sys.stderr)
+
             row["dnsmos_sig"]   = f"{dn_sig:.3f}"   if not math.isnan(dn_sig)   else ""
             row["dnsmos_bak"]   = f"{dn_bak:.3f}"   if not math.isnan(dn_bak)   else ""
             row["dnsmos_ovrl"]  = f"{dn_ovrl:.3f}"  if not math.isnan(dn_ovrl)  else ""
@@ -254,7 +372,8 @@ def main() -> int:
             row["aecmos_other"] = f"{ae_other:.3f}" if not math.isnan(ae_other) else ""
             row["aecmos_dt"]    = f"{ae_dt:.3f}"    if not math.isnan(ae_dt)    else ""
             writer.writerow(row)
-    print(f"wrote {args.out_csv}: {n_rows} rows total, {n_scored_dnsmos} with DNSMOS scores")
+    print(f"wrote {args.out_csv}: {n_rows} rows, DNSMOS scored {n_scored_dnsmos}, "
+          f"AECMOS scored {n_scored_aecmos}")
     return 0
 
 
