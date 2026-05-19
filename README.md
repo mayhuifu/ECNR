@@ -592,6 +592,36 @@ CSV schema is a strict subset of the locked ADR-0011 §4 contract: the `config_h
 
 The CMake option `ECNR_BUILD_EVAL` (default ON) gates this target; cross-builds set it OFF — the harness is a host-only tool.
 
+#### Augmenting eval CSVs with perceptual MOS (`reference/score_mos.py`)
+
+The ERLE numbers `ecnr_eval` produces are objective but model-biased. For decisions that need to track *perceptual* quality — Phase-1 acceptance bar, ADR-0012 near-end damage metric, listening-test stand-in — the published reference is **DNSMOS P.835** (speech / background / overall MOS) and **AECMOS** (echo / other / doubletalk MOS), both Microsoft Research releases shipped as ONNX models.
+
+`reference/score_mos.py` consumes the `ecnr_eval --run` CSV and emits an augmented CSV with six new columns: `dnsmos_sig`, `dnsmos_bak`, `dnsmos_ovrl`, `aecmos_echo`, `aecmos_other`, `aecmos_dt` (all on the 1–5 MOS scale). Self-contained on `numpy` + `scipy` + `onnxruntime`; no `librosa` or `soundfile` dependency.
+
+Model download (separate from the repo):
+
+```sh
+mkdir -p models
+# DNSMOS P.835 (~10 MB, Apache-2.0)
+curl -L -o models/dnsmos_p835.onnx \
+    https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/sig_bak_ovr.onnx
+# AECMOS — pin the model the AEC-Challenge release uses; see:
+# https://github.com/microsoft/AEC-Challenge/tree/main/AECMOS
+```
+
+Run after `ecnr_eval --run`:
+
+```sh
+python3 reference/score_mos.py \
+    --in-csv     /tmp/eval/results.csv \
+    --out-csv    /tmp/eval/results_with_mos.csv \
+    --conditions conditions/synthetic \
+    --out-wavs   /tmp/eval \
+    --dnsmos-model models/dnsmos_p835.onnx
+```
+
+When a model isn't supplied, the corresponding columns are filled with NaN and a one-line warning prints — the script still runs end-to-end (useful for schema-only smoke tests in CI). The AECMOS path is currently a structural placeholder: it accepts the `--aecmos-model` argument but the inference pipeline is not yet wired (the feature extraction is model-checkpoint-specific and needs the AECMOS reference implementation to be ported; see the module docstring).
+
 ---
 
 ## Common failures & fixes
