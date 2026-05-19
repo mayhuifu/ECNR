@@ -38,6 +38,11 @@ struct Args {
   // active and feeding bit-identical channels triggers a one-shot
   // stderr warning from Beamformer.
   bool bypass_beamformer = false;
+  // Enable the post-NS AGC stage (WebRTC AGC2) per ADR-0001. Default OFF
+  // to preserve historical bench behaviour for regression comparison;
+  // pass --agc to normalise output to ~−19 dBFS RMS for 3GPP TS 26.131
+  // hands-free SLR compliance.
+  bool agc_enabled = false;
 };
 
 void PrintUsage(const char* prog) {
@@ -53,7 +58,10 @@ void PrintUsage(const char* prog) {
                "                       output is printed on exit when both are set.\n"
                "  --bypass-beamformer  use Beamformer passthrough (ch[0] verbatim)\n"
                "                       instead of DSB. Right for mono input duplicated\n"
-               "                       across channels (no spatial information).\n",
+               "                       across channels (no spatial information).\n"
+               "  --agc                enable post-NS AGC2 stage (ADR-0001). Normalises\n"
+               "                       output to ~-19 dBFS RMS for VoLTE/VoNR uplink-\n"
+               "                       loudness compliance (3GPP TS 26.131 SLR target).\n",
                prog);
 }
 
@@ -89,6 +97,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
       }
     } else if (flag == "--bypass-beamformer") {
       a->bypass_beamformer = true;
+    } else if (flag == "--agc") {
+      a->agc_enabled = true;
     } else if (flag == "-h" || flag == "--help") {
       return false;
     } else {
@@ -181,6 +191,7 @@ int main(int argc, char** argv) {
   } else {
     chain.SetNsDryBlend(args.ns_dry_blend);
   }
+  chain.SetAgcEnabled(args.agc_enabled);
 
   // mic_wav.samples is interleaved; total frame count is bounded by both
   // the mic and ref durations (whichever is shorter wins; render frames
@@ -259,10 +270,11 @@ int main(int argc, char** argv) {
   // erle_db is sourced from APM stats (Task 6); under the Phase-0 stub the
   // optional is nullopt and we print N/A. Once the WebRTC backend lands,
   // the same code path emits the real value without a label change.
-  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f  mic_ch=%d  bf=%s",
+  std::printf("frames=%zu  audio=%.3fs  cpu=%.3fs  rtf=%.4f  mic_ch=%d  bf=%s  agc=%s",
               total_frames, s.audio_time_s, s.cpu_time_s, s.Rtf(),
               file_mic_channels,
-              args.bypass_beamformer ? "bypass" : "dsb");
+              args.bypass_beamformer ? "bypass" : "dsb",
+              args.agc_enabled ? "on" : "off");
   if (s.echo_return_loss_enhancement_db.has_value()) {
     std::printf("  erle_db=%.2f", *s.echo_return_loss_enhancement_db);
   } else {

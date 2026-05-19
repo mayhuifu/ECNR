@@ -7,6 +7,7 @@
 
 #include "core/frame.h"
 #include "pipeline/aec3_adapter.h"
+#include "pipeline/agc2_adapter.h"
 #include "pipeline/beamformer.h"
 #include "pipeline/rnnoise_adapter.h"
 
@@ -16,6 +17,8 @@ struct AecChain::Impl {
   Beamformer beamformer;
   Aec3Adapter aec3;
   RnNsAdapter ns;
+  Agc2Adapter agc;
+  bool agc_enabled = false;       // post-NS AGC stage; default OFF
   ChainStats stats;
   int sample_rate_hz = 0;
   int num_mics = 0;
@@ -36,6 +39,7 @@ bool AecChain::Init(int sample_rate_hz, int num_mics,
   if (!impl_->beamformer.Init(sample_rate_hz, num_mics, geometry)) return false;
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
   if (!impl_->ns.Init(sample_rate_hz)) return false;
+  if (!impl_->agc.Init(sample_rate_hz)) return false;
   impl_->sample_rate_hz = sample_rate_hz;
   impl_->num_mics = num_mics;
   Reset();
@@ -89,6 +93,11 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
   Frame post_aec;
   impl_->aec3.ProcessCapture(post_bf, post_aec);
   impl_->ns.Process(post_aec);
+  // Post-NS AGC (ADR-0001 architecture). Off by default to preserve
+  // historical bench/live behaviour; ecnr_bench / ecnr_live opt in.
+  if (impl_->agc_enabled) {
+    impl_->agc.Process(post_aec);
+  }
 
   uplink_out.n_channels = 1;
   uplink_out.n_samples = post_aec.n_samples;
@@ -125,6 +134,7 @@ void AecChain::Reset() {
   impl_->beamformer.Reset();
   impl_->aec3.Reset();
   impl_->ns.Reset();
+  impl_->agc.Reset();
   impl_->stats = {};
 }
 
@@ -138,6 +148,10 @@ void AecChain::SetNsDryBlend(float blend) {
 
 void AecChain::SetNsVadBlendRange(float low, float high) {
   impl_->ns.SetVadBlendRange(low, high);
+}
+
+void AecChain::SetAgcEnabled(bool enabled) {
+  impl_->agc_enabled = enabled;
 }
 
 const ChainStats& AecChain::Stats() const { return impl_->stats; }

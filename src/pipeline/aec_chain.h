@@ -134,6 +134,15 @@ class AecChain {
   // chopping). Forwards to RnNsAdapter::SetVadBlendRange.
   void SetNsVadBlendRange(float low, float high);
 
+  // Enable/disable the post-NS AGC stage (WebRTC AGC2). The architecture
+  // (ADR-0001) places AGC after NS, so this stage normalizes the FINAL
+  // uplink signal to a transmission-compliant level (default WebRTC AGC2
+  // targets ~−19 dBFS RMS, comfortably inside 3GPP TS 26.131 hands-free
+  // SLR 13 dB ±4). Defaults to OFF to preserve pre-AGC bench behaviour;
+  // ecnr_bench / ecnr_live opt in via a CLI flag. Real-time safe; can
+  // be called between frames.
+  void SetAgcEnabled(bool enabled);
+
   const ChainStats& Stats() const;
 
  private:
