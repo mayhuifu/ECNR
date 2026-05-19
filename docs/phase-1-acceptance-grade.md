@@ -95,6 +95,39 @@ The **soft targets** (especially `dnsmos_sig` at 3.5) look optimistic for our co
 
 Action: defer adjusting §2 targets until either Phase-2 cabin data is in hand OR Phase-3 RES is tried — the next round of measurements will tell us whether 3.5 is "wrong target" or "right target, chain needs more work."
 
+## First NS-blend tuning sweep (2026-05-19, post-AGC2)
+
+Ran `reference/sweep_ns_blend.py` against `reference/mixed_sound.wav` + `reference/reference_sound_to_be_eliminated.wav`. Nine configs: default RNNoise + Step A blends (0.15, 0.25) + Step B VAD-blends (high = 0.30, 0.50, 0.70, 0.85, 1.00) + NS-off ceiling. All AGC off, bypass-beamformer on (mono input).
+
+| Config | `dnsmos_sig` | `dnsmos_bak` | `dnsmos_ovrl` | `aecmos_echo` | `aecmos_other` | `aecmos_dt` | Floor verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **rnnoise_default**  | **2.91** | **3.95** | **2.48** | **4.45** | 2.60 | **3.52** | FAIL: dnsmos_sig↓ dnsmos_ovrl↓ |
+| step_a_blend_15      | 2.54 | 3.19 | 1.97 | 3.66 | 2.18 | 2.92 | FAIL: + aecmos_dt↓ |
+| step_a_blend_25      | 2.28 | 2.72 | 1.67 | 3.77 | 1.98 | 2.87 | FAIL: + aecmos_dt↓ |
+| step_b_vad_0p30      | 2.25 | 3.82 | 1.86 | 3.93 | 1.98 | 2.95 | FAIL: + aecmos_dt↓ |
+| step_b_vad_0p50      | 2.48 | 3.75 | 2.03 | 4.04 | 1.68 | 2.86 | FAIL: + aecmos_dt↓ |
+| step_b_vad_0p70      | 2.57 | 3.66 | 2.16 | 4.16 | 1.58 | 2.87 | FAIL: + aecmos_dt↓ |
+| step_b_vad_0p85      | 2.72 | 3.56 | 2.27 | 4.16 | 1.55 | 2.86 | FAIL: + aecmos_dt↓ |
+| step_b_vad_1p00      | 2.69 | 3.28 | 2.16 | 4.16 | 1.55 | 2.85 | FAIL: + aecmos_dt↓ |
+| ns_off_ceiling       | 2.21 | 1.79 | 1.61 | 3.84 | 1.70 | 2.77 | FAIL: all four |
+
+Per-metric winner — **the same config across every metric**: `rnnoise_default`.
+
+### Key finding: Step A + Step B mitigations are NET NEGATIVE on this content
+
+Every blend variant scores worse on `dnsmos_sig` than plain RNNoise. The previous v0.2-era "voice volume" observations were a **level issue**, not a **quality issue**: blending dry input back recovered amplitude but reintroduced residual echo bleed-through, which DNSMOS penalises more than RNNoise's NS aggression. **AGC is the right tool for level normalisation; NS blend was solving the wrong problem on this content.**
+
+This doesn't necessarily generalise — Step A + B may still help on road-noise or babble where RNNoise's aggression is more severe. The `road_voice_realsynth` numbers in the AGC-off table above (dnsmos_sig 1.54 with default RNNoise) suggest Step B's blend ladder might actually help on the much-quieter cases where RNNoise destroys voice entirely. A follow-up sweep on the road-noise fixture is queued.
+
+### Implications for the chain
+
+1. **`rnnoise_default` should be the production default**, not Step B `0.0,0.30`. Step B was tuned by ear on a different fixture; the gate disagrees on this one.
+2. **The gate cannot be cleared by NS-blend tuning alone.** Best `dnsmos_sig = 2.91`, floor = 3.0 — close but still failing. To clear the floor on this content we need one of:
+   - A neural RES post-filter (Phase 3 work, ADR-0007).
+   - A different NS model (DeepFilterNet candidate).
+   - A different mitigation approach to RNNoise's over-suppression (e.g., per-band gain-floor instead of global wet/dry blend).
+3. **`aecmos_other` ~2.6 on default vs ~1.5–2.0 on blends.** AECMOS doubletalk-mode's "other" score (near-end damage) tracks `dnsmos_sig` directionally. This means our two perceptual metrics agree, which is reassuring for the methodology.
+
 ## Next moves the data points us toward
 
 In rough priority order:
