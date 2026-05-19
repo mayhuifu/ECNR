@@ -622,6 +622,21 @@ python3 reference/score_mos.py \
 
 When a model isn't supplied, the corresponding columns are filled with NaN and a one-line warning prints — the script still runs end-to-end (useful for schema-only smoke tests in CI). The AECMOS path is currently a structural placeholder: it accepts the `--aecmos-model` argument but the inference pipeline is not yet wired (the feature extraction is model-checkpoint-specific and needs the AECMOS reference implementation to be ported; see the module docstring).
 
+#### Grading against the Phase-1 acceptance bar (`reference/check_acceptance_bar.py`)
+
+[ADR-0012](docs/adr/0012-phase-1-acceptance-bar.md) locks per-metric targets + floors on the six MOS columns. `reference/check_acceptance_bar.py` is the thin gate that grades each condition against them and exits non-zero on any floor miss. Wire into CI once the chain consistently passes.
+
+```sh
+python3 reference/check_acceptance_bar.py \
+    --in-csv /tmp/eval/results_with_mos.csv
+# Per-condition PASS / WARN / FAIL report, summary line, exit code:
+#   0 = green (all floors + targets met)
+#   1 = BLOCK (any floor missed — not lab-ready)
+#   2 = WARN  (floors met but soft targets pending)
+```
+
+The ADR-0012 numbers are intentionally opinion-dense and aspirational pending Phase-2 cabin data; the gate is the single point of enforcement, so when the ADR updates, this file is what changes.
+
 ---
 
 ## Common failures & fixes
