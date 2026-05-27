@@ -28,11 +28,16 @@
 //     Iterates DIR/*/ subdirectories, runs the chain twice per condition,
 //     emits a CSV per ADR-0011 §4. Exits non-zero if any condition is
 //     malformed (missing track, sample-rate mismatch, length mismatch).
+//     If a condition also contains near_end_clean.wav, the CSV includes
+//     double-talk near-end preservation metrics used by the GB/T 45314
+//     emergency-call pre-compliance gate.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -58,12 +63,19 @@ struct Args {
   std::string out_csv;
   std::string out_wavs_dir;  // optional; if set, write per-condition output WAVs here
   bool agc_enabled = false;  // optional post-NS AGC2 (mirrors ecnr_bench --agc)
+  // RNNoise blend controls mirror ecnr_bench/ecnr_live so pre-compliance
+  // gates can sweep production tuning without a separate tool path.
+  float ns_dry_blend = 0.0f;
+  bool ns_vad_blend_set = false;
+  float ns_vad_blend_low = 0.0f;
+  float ns_vad_blend_high = 0.0f;
 };
 
 void PrintUsage(const char* prog) {
   std::fprintf(stderr,
       "usage: %s --self-test\n"
       "       %s --run --conditions DIR --out FILE.csv [--out-wavs WAV_DIR]\n"
+      "          [--agc] [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n"
       "\n"
       "  --self-test           in-memory synthetic fixture; asserts ERLE looks healthy.\n"
       "                        No file I/O. Used as CI smoke + harness hello-world.\n"
@@ -87,6 +99,34 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--out" && i + 1 < argc) a->out_csv = argv[++i];
     else if (flag == "--out-wavs" && i + 1 < argc) a->out_wavs_dir = argv[++i];
     else if (flag == "--agc") a->agc_enabled = true;
+    else if (flag == "--ns-dry-blend" && i + 1 < argc) {
+      try {
+        a->ns_dry_blend = std::stof(argv[++i]);
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --ns-dry-blend value: %s\n",
+                     e.what());
+        return false;
+      }
+    }
+    else if (flag == "--ns-vad-blend" && i + 1 < argc) {
+      const std::string val = argv[++i];
+      const auto comma = val.find(',');
+      if (comma == std::string::npos) {
+        std::fprintf(stderr,
+            "--ns-vad-blend expects \"low,high\" (e.g. 0.0,0.30); got: %s\n",
+            val.c_str());
+        return false;
+      }
+      try {
+        a->ns_vad_blend_low = std::stof(val.substr(0, comma));
+        a->ns_vad_blend_high = std::stof(val.substr(comma + 1));
+        a->ns_vad_blend_set = true;
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --ns-vad-blend value '%s': %s\n",
+                     val.c_str(), e.what());
+        return false;
+      }
+    }
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
   }
@@ -126,12 +166,39 @@ void SynthSine(std::vector<int16_t>* out, int n_samples, double freq_hz,
 struct ChainRunResult {
   std::vector<int16_t> residual;
   std::vector<double> reported_erle_db_per_frame;  // unfilled frames omitted
+  std::vector<double> residual_echo_likelihood_per_frame;  // unfilled frames omitted
+  double rtf = 0.0;
 };
+
+struct ChainConfig {
+  bool agc_enabled = false;
+  float ns_dry_blend = 0.0f;
+  bool ns_vad_blend_set = false;
+  float ns_vad_blend_low = 0.0f;
+  float ns_vad_blend_high = 0.0f;
+};
+
+std::string ConfigName(const ChainConfig& config) {
+  std::string name = "default-webrtc";
+  if (config.agc_enabled) name += "+agc";
+  char blend_buf[64];
+  if (config.ns_vad_blend_set) {
+    std::snprintf(blend_buf, sizeof(blend_buf), "+ns_vad_%.2f_%.2f",
+                  config.ns_vad_blend_low, config.ns_vad_blend_high);
+  } else if (config.ns_dry_blend != 0.0f) {
+    std::snprintf(blend_buf, sizeof(blend_buf), "+ns_dry_%.2f",
+                  config.ns_dry_blend);
+  } else {
+    std::snprintf(blend_buf, sizeof(blend_buf), "%s", "");
+  }
+  name += blend_buf;
+  return name;
+}
 
 ChainRunResult RunChain(const std::vector<int16_t>& ref,
                         const std::vector<int16_t>& capture,
                         int sample_rate_hz, int num_mics,
-                        bool agc_enabled = false) {
+                        const ChainConfig& config = {}) {
   const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
   ecnr::AecChain chain;
   // Passthrough geometry — we don't care about beamforming for ERLE.
@@ -142,7 +209,13 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
                  sample_rate_hz, num_mics);
     return {};
   }
-  chain.SetAgcEnabled(agc_enabled);
+  if (config.ns_vad_blend_set) {
+    chain.SetNsVadBlendRange(config.ns_vad_blend_low,
+                             config.ns_vad_blend_high);
+  } else {
+    chain.SetNsDryBlend(config.ns_dry_blend);
+  }
+  chain.SetAgcEnabled(config.agc_enabled);
 
   const size_t n_frames =
       std::min(ref.size(), capture.size()) /
@@ -151,6 +224,7 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
   ChainRunResult r;
   r.residual.reserve(n_frames * static_cast<size_t>(frame_samples));
   r.reported_erle_db_per_frame.reserve(n_frames);
+  r.residual_echo_likelihood_per_frame.reserve(n_frames);
 
   ecnr::Frame ref_f, mic_f, out_f;
   for (size_t i = 0; i < n_frames; ++i) {
@@ -180,7 +254,11 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
     if (s.echo_return_loss_enhancement_db.has_value()) {
       r.reported_erle_db_per_frame.push_back(*s.echo_return_loss_enhancement_db);
     }
+    if (s.residual_echo_likelihood.has_value()) {
+      r.residual_echo_likelihood_per_frame.push_back(*s.residual_echo_likelihood);
+    }
   }
+  r.rtf = chain.Stats().Rtf();
   return r;
 }
 
@@ -234,6 +312,140 @@ ecnr::eval::ErleStats ComputeTrueErle(const std::vector<int16_t>& echo_only_mic,
     acc.Push(echo_only_mic.data() + off, residual.data() + off, frame_samples);
   }
   return acc.Finalize();
+}
+
+std::vector<double> ComputePerFrameErle(const std::vector<int16_t>& echo_in,
+                                        const std::vector<int16_t>& residual,
+                                        int sample_rate_hz) {
+  const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
+  const size_t n_frames =
+      std::min(echo_in.size(), residual.size()) /
+      static_cast<size_t>(frame_samples);
+  std::vector<double> out;
+  out.reserve(n_frames);
+  for (size_t i = 0; i < n_frames; ++i) {
+    const size_t off = i * static_cast<size_t>(frame_samples);
+    const double rms_in = ecnr::eval::Rms(echo_in.data() + off, frame_samples);
+    const double rms_res = ecnr::eval::Rms(residual.data() + off, frame_samples);
+    const auto erle = ecnr::eval::ErleDb(rms_in, rms_res);
+    out.push_back(erle.value_or(0.0));
+  }
+  return out;
+}
+
+std::optional<double> ErleAtMs(const std::vector<double>& per_frame_erle_db,
+                               int time_ms) {
+  if (per_frame_erle_db.empty()) return std::nullopt;
+  const size_t idx = std::min(
+      static_cast<size_t>(std::max(0, time_ms) / ecnr::kFrameDurationMs),
+      per_frame_erle_db.size() - 1);
+  return per_frame_erle_db[idx];
+}
+
+std::optional<double> MedianErleInRange(const std::vector<double>& per_frame_erle_db,
+                                        int start_ms, int end_ms) {
+  if (per_frame_erle_db.empty() || end_ms <= start_ms) return std::nullopt;
+  const size_t begin = std::min(
+      static_cast<size_t>(std::max(0, start_ms) / ecnr::kFrameDurationMs),
+      per_frame_erle_db.size());
+  const size_t end = std::min(
+      static_cast<size_t>(std::max(0, end_ms) / ecnr::kFrameDurationMs),
+      per_frame_erle_db.size());
+  if (begin >= end) return std::nullopt;
+  std::vector<double> sorted(per_frame_erle_db.begin() + begin,
+                             per_frame_erle_db.begin() + end);
+  std::sort(sorted.begin(), sorted.end());
+  return sorted[sorted.size() / 2];
+}
+
+std::optional<double> ErleWorstOneSecondMedianAfterSettle(
+    const std::vector<double>& per_frame_erle_db) {
+  constexpr int kWindowFrames = 100;  // 1 s at 10 ms/frame.
+  if (static_cast<int>(per_frame_erle_db.size()) <= kSettleFrames + kWindowFrames) {
+    return std::nullopt;
+  }
+  std::optional<double> worst;
+  for (int start = kSettleFrames;
+       start + kWindowFrames <= static_cast<int>(per_frame_erle_db.size());
+       start += 10) {
+    std::vector<double> window(per_frame_erle_db.begin() + start,
+                               per_frame_erle_db.begin() + start + kWindowFrames);
+    std::sort(window.begin(), window.end());
+    const double median = window[window.size() / 2];
+    if (!worst.has_value() || median < *worst) worst = median;
+  }
+  return worst;
+}
+
+std::optional<double> LevelRangeDb(const std::vector<int16_t>& samples,
+                                   int sample_rate_hz,
+                                   int window_ms,
+                                   int skip_ms) {
+  const int window_samples = sample_rate_hz * window_ms / 1000;
+  const int skip_samples = sample_rate_hz * skip_ms / 1000;
+  if (window_samples <= 0 ||
+      static_cast<int>(samples.size()) < skip_samples + window_samples) {
+    return std::nullopt;
+  }
+  std::vector<double> levels;
+  for (size_t off = static_cast<size_t>(skip_samples);
+       off + static_cast<size_t>(window_samples) <= samples.size();
+       off += static_cast<size_t>(window_samples)) {
+    const double dbfs = ecnr::eval::RmsDbfs(samples.data() + off, window_samples);
+    if (std::isfinite(dbfs)) levels.push_back(dbfs);
+  }
+  if (levels.empty()) return std::nullopt;
+  const auto [lo, hi] = std::minmax_element(levels.begin(), levels.end());
+  return *hi - *lo;
+}
+
+struct NearEndStats {
+  std::optional<double> level_delta_median_db;
+  std::optional<double> correlation;
+  int frames_used = 0;
+};
+
+NearEndStats ComputeNearEndStats(const std::vector<int16_t>& near_end_clean,
+                                 const std::vector<int16_t>& residual,
+                                 int sample_rate_hz) {
+  const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
+  const size_t n_frames =
+      std::min(near_end_clean.size(), residual.size()) /
+      static_cast<size_t>(frame_samples);
+  std::vector<double> deltas;
+  double sum_x2 = 0.0;
+  double sum_y2 = 0.0;
+  double sum_xy = 0.0;
+  NearEndStats stats;
+  for (size_t f = 0; f < n_frames; ++f) {
+    const size_t off = f * static_cast<size_t>(frame_samples);
+    const double rms_clean =
+        ecnr::eval::Rms(near_end_clean.data() + off, frame_samples);
+    if (rms_clean <= 0.0 ||
+        ecnr::eval::RmsDbfs(near_end_clean.data() + off, frame_samples) < -50.0) {
+      continue;
+    }
+    const double rms_out = ecnr::eval::Rms(residual.data() + off, frame_samples);
+    if (rms_out > 0.0) {
+      deltas.push_back(20.0 * std::log10(rms_out / rms_clean));
+    }
+    for (int i = 0; i < frame_samples; ++i) {
+      const double x = static_cast<double>(near_end_clean[off + i]);
+      const double y = static_cast<double>(residual[off + i]);
+      sum_x2 += x * x;
+      sum_y2 += y * y;
+      sum_xy += x * y;
+    }
+    ++stats.frames_used;
+  }
+  if (!deltas.empty()) {
+    std::sort(deltas.begin(), deltas.end());
+    stats.level_delta_median_db = deltas[deltas.size() / 2];
+  }
+  if (sum_x2 > 0.0 && sum_y2 > 0.0) {
+    stats.correlation = sum_xy / std::sqrt(sum_x2 * sum_y2);
+  }
+  return stats;
 }
 
 int RunSelfTest() {
@@ -290,6 +502,8 @@ struct Condition {
   std::vector<int16_t> mic;
   std::vector<int16_t> ref;
   std::vector<int16_t> echo_only_mic;
+  std::vector<int16_t> near_end_clean;
+  bool has_near_end_clean = false;
 };
 
 bool LoadCondition(const std::filesystem::path& dir, Condition* c,
@@ -331,11 +545,27 @@ bool LoadCondition(const std::filesystem::path& dir, Condition* c,
   c->mic.resize(common_len);
   c->ref.resize(common_len);
   c->echo_only_mic.resize(common_len);
+
+  const auto near_path = dir / "near_end_clean.wav";
+  if (std::filesystem::exists(near_path)) {
+    ecnr::hal::WavData near_w;
+    if (!ecnr::hal::ReadWavMono(near_path.string(), &near_w, err)) {
+      *err = "read near_end_clean.wav: " + *err;
+      return false;
+    }
+    if (near_w.sample_rate_hz != c->sample_rate_hz) {
+      *err = "near_end_clean.wav sample-rate mismatch";
+      return false;
+    }
+    c->near_end_clean = std::move(near_w.samples);
+    c->near_end_clean.resize(common_len);
+    c->has_near_end_clean = true;
+  }
   return true;
 }
 
 int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
-             const std::string& out_wavs_dir, bool agc_enabled) {
+             const std::string& out_wavs_dir, const ChainConfig& config) {
   namespace fs = std::filesystem;
   std::error_code ec;
   if (!fs::is_directory(conditions_dir, ec)) {
@@ -360,8 +590,15 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
     return 1;
   }
   csv << "condition_id,config_name,sample_rate_hz,"
+         "frame_duration_ms,rtf,"
          "erle_reported_median_db,erle_reported_p10_db,erle_reported_p90_db,"
          "erle_true_median_db,erle_true_p10_db,erle_true_p90_db,"
+         "erle_initial_0ms_db,erle_initial_200ms_db,erle_initial_1000ms_db,"
+         "erle_initial_1200ms_db,erle_initial_1500ms_db,erle_initial_5000ms_db,"
+         "erle_steady_median_db,erle_worst_1s_median_after_settle_db,"
+         "erle_time_variation_db,noise_level_range_db,"
+         "residual_echo_likelihood_median,residual_echo_likelihood_p90,"
+         "near_end_level_delta_median_db,near_end_correlation,near_end_frames_used,"
          "frames_used_true,frames_below_gate_true,frames_skipped_settle_true\n";
 
   int failures = 0;
@@ -382,9 +619,12 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
     // Pass A: production-style run on the mixed mic, capture per-frame
     // reported ERLE.
     auto run_a = RunChain(cond.ref, cond.mic, cond.sample_rate_hz,
-                          /*num_mics=*/2, agc_enabled);
+                          /*num_mics=*/2, config);
     const auto reported =
         AggregatePercentiles(run_a.reported_erle_db_per_frame, kSettleFrames);
+    const auto residual_echo_likelihood =
+        AggregatePercentiles(run_a.residual_echo_likelihood_per_frame,
+                             kSettleFrames);
 
     // Optionally emit the per-condition chain output WAV. Consumed by
     // reference/score_mos.py to produce DNSMOS / AECMOS scores per
@@ -402,10 +642,33 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
 
     // Pass B: echo-only run, fresh chain instance, capture residual for
     // true-ERLE.
+    ChainConfig echo_metric_config = config;
+    echo_metric_config.agc_enabled = false;
     auto run_b = RunChain(cond.ref, cond.echo_only_mic,
-                          cond.sample_rate_hz, /*num_mics=*/2);
+                          cond.sample_rate_hz, /*num_mics=*/2,
+                          echo_metric_config);
     const auto true_stats =
         ComputeTrueErle(cond.echo_only_mic, run_b.residual, cond.sample_rate_hz);
+    const auto true_erle_per_frame =
+        ComputePerFrameErle(cond.echo_only_mic, run_b.residual, cond.sample_rate_hz);
+    const auto steady_erle = MedianErleInRange(
+        true_erle_per_frame,
+        std::max(0, static_cast<int>(cond.echo_only_mic.size()) * 1000 /
+                        cond.sample_rate_hz - 1000),
+        static_cast<int>(cond.echo_only_mic.size()) * 1000 / cond.sample_rate_hz);
+    const auto worst_1s = ErleWorstOneSecondMedianAfterSettle(true_erle_per_frame);
+    std::optional<double> time_variation;
+    if (steady_erle.has_value() && worst_1s.has_value()) {
+      time_variation = std::max(0.0, *steady_erle - *worst_1s);
+    }
+    const auto noise_range =
+        LevelRangeDb(run_a.residual, cond.sample_rate_hz,
+                     /*window_ms=*/100, /*skip_ms=*/1000);
+    NearEndStats near_stats;
+    if (cond.has_near_end_clean) {
+      near_stats = ComputeNearEndStats(cond.near_end_clean, run_a.residual,
+                                       cond.sample_rate_hz);
+    }
 
     auto fmt = [](const std::optional<double>& v) {
       char buf[32];
@@ -414,12 +677,29 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
       return std::string(buf);
     };
     csv << cond.id << ","
-        << "default-webrtc" << ","
+        << ConfigName(config) << ","
         << cond.sample_rate_hz << ","
+        << ecnr::kFrameDurationMs << ","
+        << fmt(run_a.rtf) << ","
         << fmt(reported.median_db) << "," << fmt(reported.p10_db) << ","
         << fmt(reported.p90_db) << ","
         << fmt(true_stats.median_db) << "," << fmt(true_stats.p10_db) << ","
         << fmt(true_stats.p90_db) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 0)) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 200)) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 1000)) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 1200)) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 1500)) << ","
+        << fmt(ErleAtMs(true_erle_per_frame, 5000)) << ","
+        << fmt(steady_erle) << ","
+        << fmt(worst_1s) << ","
+        << fmt(time_variation) << ","
+        << fmt(noise_range) << ","
+        << fmt(residual_echo_likelihood.median_db) << ","
+        << fmt(residual_echo_likelihood.p90_db) << ","
+        << fmt(near_stats.level_delta_median_db) << ","
+        << fmt(near_stats.correlation) << ","
+        << near_stats.frames_used << ","
         << true_stats.frames_used << ","
         << true_stats.frames_below_gate << ","
         << true_stats.frames_skipped_settle
@@ -440,6 +720,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   if (args.self_test) return RunSelfTest();
+  ChainConfig config;
+  config.agc_enabled = args.agc_enabled;
+  config.ns_dry_blend = args.ns_dry_blend;
+  config.ns_vad_blend_set = args.ns_vad_blend_set;
+  config.ns_vad_blend_low = args.ns_vad_blend_low;
+  config.ns_vad_blend_high = args.ns_vad_blend_high;
   return RunSweep(args.conditions_dir, args.out_csv, args.out_wavs_dir,
-                  args.agc_enabled);
+                  config);
 }

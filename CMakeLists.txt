@@ -21,6 +21,7 @@ endif()
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 include(FetchContent)
+find_package(Python3 COMPONENTS Interpreter)
 
 # --- libsndfile -----------------------------------------------------------------
 # Prefer pkg-config (works for both Homebrew and most Linux distros).
@@ -184,6 +185,13 @@ gtest_discover_tests(beamformer_test)
 add_executable(metrics_test src/tests/metrics_test.cc)
 target_link_libraries(metrics_test PRIVATE ecnr_eval_metrics GTest::gtest_main)
 gtest_discover_tests(metrics_test)
+
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME Gbt45314EcallGate.PythonUnit
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/reference/test_gbt45314_ecall_gate.py
+  )
+endif()
 
 # -----------------------------------------------------------------------------
 # Summary
