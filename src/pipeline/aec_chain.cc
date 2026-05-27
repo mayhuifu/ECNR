@@ -69,6 +69,11 @@ void AecChain::ProcessRender(const Frame& render) {
 }
 
 void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
+  ProcessCaptureWithTaps(mic_in, uplink_out, {});
+}
+
+void AecChain::ProcessCaptureWithTaps(const Frame& mic_in, Frame& uplink_out,
+                                      const AecStageTaps& taps) {
   assert(mic_in.n_channels == impl_->num_mics);
   assert(mic_in.n_samples == FrameSamplesFor(impl_->sample_rate_hz));
   if (mic_in.n_channels != impl_->num_mics ||
@@ -89,15 +94,21 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
 
   Frame post_bf;
   impl_->beamformer.Process(mic_in, post_bf);
+  if (taps.post_beamformer) *taps.post_beamformer = post_bf;
 
   Frame post_aec;
   impl_->aec3.ProcessCapture(post_bf, post_aec);
+  if (taps.post_aec) *taps.post_aec = post_aec;
+
   impl_->ns.Process(post_aec);
+  if (taps.post_ns) *taps.post_ns = post_aec;
+
   // Post-NS AGC (ADR-0001 architecture). Off by default to preserve
   // historical bench/live behaviour; ecnr_bench / ecnr_live opt in.
   if (impl_->agc_enabled) {
     impl_->agc.Process(post_aec);
   }
+  if (taps.post_agc) *taps.post_agc = post_aec;
 
   uplink_out.n_channels = 1;
   uplink_out.n_samples = post_aec.n_samples;

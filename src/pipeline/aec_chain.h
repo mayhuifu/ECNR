@@ -66,6 +66,20 @@ struct ChainStats {
   }
 };
 
+// Optional per-stage snapshots for diagnostics and release-gate localization.
+// Callers may pass only the stages they need; null pointers are ignored.
+// Frames are mono after the beamformer and represent:
+//   post_beamformer: capture entering AEC3
+//   post_aec:        AEC3 output before RNNoise
+//   post_ns:         RNNoise output before optional AGC2
+//   post_agc:        final output after optional AGC2
+struct AecStageTaps {
+  Frame* post_beamformer = nullptr;
+  Frame* post_aec = nullptr;
+  Frame* post_ns = nullptr;
+  Frame* post_agc = nullptr;
+};
+
 // AEC + NS chain. Phase 0 ships stub backends behind this interface; Phase 0.5
 // swaps in WebRTC AEC3 + RNNoise without changing callers.
 class AecChain {
@@ -102,6 +116,13 @@ class AecChain {
   // mic_in.n_channels must equal the configured num_mics; uplink_out emerges
   // mono (n_channels = 1) after Beamformer collapses the multi-mic input.
   void ProcessCapture(const Frame& mic_in, Frame& uplink_out);
+
+  // Same processing contract as ProcessCapture, with optional diagnostic
+  // snapshots at stage boundaries. Intended for offline harnesses and debug
+  // builds; production real-time callers should continue using ProcessCapture
+  // unless they have preallocated tap frames and need stage telemetry.
+  void ProcessCaptureWithTaps(const Frame& mic_in, Frame& uplink_out,
+                              const AecStageTaps& taps);
 
   // Drop adapted state — call on stream restart, sample-rate change, or
   // confirmed routing change at the HAL.

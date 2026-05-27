@@ -21,6 +21,8 @@ The gate is **blocking** for internal release to GB/T 45314 validation. It is no
 
 `ecnr_eval` also exposes the production RNNoise blend controls (`--ns-dry-blend` and `--ns-vad-blend`) so emergency-call presets can be swept with the same CSV schema. The gate must still be run on one release-candidate configuration at a time; passing one condition with a special one-off config is not a release pass.
 
+For failures, `ecnr_eval --stage-wavs DIR` writes `post_bf`, `post_aec`, `post_ns`, and `post_agc` WAVs per condition. These taps are diagnostic only, but they are part of the release workflow because they prevent misattributing AEC damage to RNNoise or AGC.
+
 ## Clause Mapping
 
 | GB/T 45314 area | Standard requirement | Software gate proxy |

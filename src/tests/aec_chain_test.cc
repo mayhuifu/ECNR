@@ -153,6 +153,35 @@ TEST(AecChain, BeamformerCollapsesToMono) {
   EXPECT_EQ(out.n_samples, FrameSamplesFor(16000));
 }
 
+TEST(AecChain, ProcessCaptureWithTapsSurfacesStageFrames) {
+  AecChain c;
+  ASSERT_TRUE(c.Init(16000, 2));
+
+  std::mt19937 rng(0x5a6e);
+  Frame render, mic, out;
+  FillNoise(render, rng, 16000, 1);
+  FillNoise(mic, rng, 16000, 2);
+
+  Frame post_bf, post_aec, post_ns, post_agc;
+  AecStageTaps taps;
+  taps.post_beamformer = &post_bf;
+  taps.post_aec = &post_aec;
+  taps.post_ns = &post_ns;
+  taps.post_agc = &post_agc;
+
+  c.ProcessRender(render);
+  c.ProcessCaptureWithTaps(mic, out, taps);
+
+  for (const Frame* f : {&post_bf, &post_aec, &post_ns, &post_agc, &out}) {
+    EXPECT_EQ(f->n_channels, 1);
+    EXPECT_EQ(f->n_samples, FrameSamplesFor(16000));
+  }
+  for (int s = 0; s < FrameSamplesFor(16000); ++s) {
+    EXPECT_EQ(post_bf.ch[0][s], mic.ch[0][s]);
+    EXPECT_EQ(post_agc.ch[0][s], out.ch[0][s]);
+  }
+}
+
 TEST(AecChain, SetStreamDelayMsAcceptsAndClamps) {
   AecChain c;
   ASSERT_TRUE(c.Init(16000, 2));

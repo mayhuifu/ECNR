@@ -583,6 +583,10 @@ The reported-vs-true divergence on this synthetic fixture (~47 dB gap) is expect
 - `--ns-dry-blend 0.20` mixes 20% post-AEC dry signal back after RNNoise; useful for checking no-speech pumping versus echo headroom.
 - `--ns-vad-blend low,high` applies the existing RNNoise-VAD-gated blend range.
 - `--agc` enables the post-NS AGC2 stage used by the emergency-call gate runs.
+- `--stage-wavs DIR` writes per-condition diagnostic taps:
+  `post_bf.wav`, `post_aec.wav`, `post_ns.wav`, and `post_agc.wav`.
+  Use this to localize whether speech damage comes from beamforming, AEC3,
+  RNNoise, or AGC.
 
 ```
 $ ./build/ecnr_eval --run --conditions ./conditions/synthetic --out results.csv

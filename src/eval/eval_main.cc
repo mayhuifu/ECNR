@@ -62,6 +62,7 @@ struct Args {
   std::string conditions_dir;
   std::string out_csv;
   std::string out_wavs_dir;  // optional; if set, write per-condition output WAVs here
+  std::string stage_wavs_dir; // optional; if set, write per-stage diagnostic WAVs
   bool agc_enabled = false;  // optional post-NS AGC2 (mirrors ecnr_bench --agc)
   // RNNoise blend controls mirror ecnr_bench/ecnr_live so pre-compliance
   // gates can sweep production tuning without a separate tool path.
@@ -86,7 +87,9 @@ void PrintUsage(const char* prog) {
       "  --out-wavs WAV_DIR    optional. When set, writes per-condition chain output\n"
       "                        as WAV_DIR/<condition_id>.wav (mic-pass A residual).\n"
       "                        Required for downstream DNSMOS / AECMOS scoring via\n"
-      "                        reference/score_mos.py.\n",
+      "                        reference/score_mos.py.\n"
+      "  --stage-wavs WAV_DIR  optional. When set, writes stage-tap diagnostics as\n"
+      "                        WAV_DIR/<condition_id>/{post_bf,post_aec,post_ns,post_agc}.wav.\n",
       prog, prog);
 }
 
@@ -98,6 +101,7 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--conditions" && i + 1 < argc) a->conditions_dir = argv[++i];
     else if (flag == "--out" && i + 1 < argc) a->out_csv = argv[++i];
     else if (flag == "--out-wavs" && i + 1 < argc) a->out_wavs_dir = argv[++i];
+    else if (flag == "--stage-wavs" && i + 1 < argc) a->stage_wavs_dir = argv[++i];
     else if (flag == "--agc") a->agc_enabled = true;
     else if (flag == "--ns-dry-blend" && i + 1 < argc) {
       try {
@@ -165,6 +169,10 @@ void SynthSine(std::vector<int16_t>* out, int n_samples, double freq_hz,
 // frame processed.
 struct ChainRunResult {
   std::vector<int16_t> residual;
+  std::vector<int16_t> post_beamformer;
+  std::vector<int16_t> post_aec;
+  std::vector<int16_t> post_ns;
+  std::vector<int16_t> post_agc;
   std::vector<double> reported_erle_db_per_frame;  // unfilled frames omitted
   std::vector<double> residual_echo_likelihood_per_frame;  // unfilled frames omitted
   double rtf = 0.0;
@@ -198,7 +206,8 @@ std::string ConfigName(const ChainConfig& config) {
 ChainRunResult RunChain(const std::vector<int16_t>& ref,
                         const std::vector<int16_t>& capture,
                         int sample_rate_hz, int num_mics,
-                        const ChainConfig& config = {}) {
+                        const ChainConfig& config = {},
+                        bool collect_stage_taps = false) {
   const int frame_samples = ecnr::FrameSamplesFor(sample_rate_hz);
   ecnr::AecChain chain;
   // Passthrough geometry — we don't care about beamforming for ERLE.
@@ -223,10 +232,17 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
 
   ChainRunResult r;
   r.residual.reserve(n_frames * static_cast<size_t>(frame_samples));
+  if (collect_stage_taps) {
+    const size_t samples = n_frames * static_cast<size_t>(frame_samples);
+    r.post_beamformer.reserve(samples);
+    r.post_aec.reserve(samples);
+    r.post_ns.reserve(samples);
+    r.post_agc.reserve(samples);
+  }
   r.reported_erle_db_per_frame.reserve(n_frames);
   r.residual_echo_likelihood_per_frame.reserve(n_frames);
 
-  ecnr::Frame ref_f, mic_f, out_f;
+  ecnr::Frame ref_f, mic_f, out_f, post_bf_f, post_aec_f, post_ns_f, post_agc_f;
   for (size_t i = 0; i < n_frames; ++i) {
     const size_t off = i * static_cast<size_t>(frame_samples);
 
@@ -245,10 +261,29 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
     }
 
     chain.ProcessRender(ref_f);
-    chain.ProcessCapture(mic_f, out_f);
+    if (collect_stage_taps) {
+      ecnr::AecStageTaps taps;
+      taps.post_beamformer = &post_bf_f;
+      taps.post_aec = &post_aec_f;
+      taps.post_ns = &post_ns_f;
+      taps.post_agc = &post_agc_f;
+      chain.ProcessCaptureWithTaps(mic_f, out_f, taps);
+    } else {
+      chain.ProcessCapture(mic_f, out_f);
+    }
 
     r.residual.insert(r.residual.end(), out_f.ch[0].begin(),
                       out_f.ch[0].begin() + out_f.n_samples);
+    if (collect_stage_taps) {
+      r.post_beamformer.insert(r.post_beamformer.end(), post_bf_f.ch[0].begin(),
+                               post_bf_f.ch[0].begin() + post_bf_f.n_samples);
+      r.post_aec.insert(r.post_aec.end(), post_aec_f.ch[0].begin(),
+                        post_aec_f.ch[0].begin() + post_aec_f.n_samples);
+      r.post_ns.insert(r.post_ns.end(), post_ns_f.ch[0].begin(),
+                       post_ns_f.ch[0].begin() + post_ns_f.n_samples);
+      r.post_agc.insert(r.post_agc.end(), post_agc_f.ch[0].begin(),
+                        post_agc_f.ch[0].begin() + post_agc_f.n_samples);
+    }
 
     const auto& s = chain.Stats();
     if (s.echo_return_loss_enhancement_db.has_value()) {
@@ -565,7 +600,9 @@ bool LoadCondition(const std::filesystem::path& dir, Condition* c,
 }
 
 int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
-             const std::string& out_wavs_dir, const ChainConfig& config) {
+             const std::string& out_wavs_dir,
+             const std::string& stage_wavs_dir,
+             const ChainConfig& config) {
   namespace fs = std::filesystem;
   std::error_code ec;
   if (!fs::is_directory(conditions_dir, ec)) {
@@ -619,7 +656,8 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
     // Pass A: production-style run on the mixed mic, capture per-frame
     // reported ERLE.
     auto run_a = RunChain(cond.ref, cond.mic, cond.sample_rate_hz,
-                          /*num_mics=*/2, config);
+                          /*num_mics=*/2, config,
+                          /*collect_stage_taps=*/!stage_wavs_dir.empty());
     const auto reported =
         AggregatePercentiles(run_a.reported_erle_db_per_frame, kSettleFrames);
     const auto residual_echo_likelihood =
@@ -637,6 +675,29 @@ int RunSweep(const std::string& conditions_dir, const std::string& out_csv,
                                     cond.sample_rate_hz, &emsg)) {
         std::fprintf(stderr, "WARN: failed to write %s: %s\n",
                      out_wav_path.string().c_str(), emsg.c_str());
+      }
+    }
+    if (!stage_wavs_dir.empty()) {
+      const fs::path stage_dir = fs::path(stage_wavs_dir) / cond.id;
+      fs::create_directories(stage_dir, ec);
+      struct StageOut {
+        const char* name;
+        const std::vector<int16_t>* samples;
+      };
+      const StageOut stages[] = {
+          {"post_bf", &run_a.post_beamformer},
+          {"post_aec", &run_a.post_aec},
+          {"post_ns", &run_a.post_ns},
+          {"post_agc", &run_a.post_agc},
+      };
+      for (const auto& stage : stages) {
+        std::string emsg;
+        const fs::path path = stage_dir / (std::string(stage.name) + ".wav");
+        if (!ecnr::hal::WriteWavMono(path.string(), *stage.samples,
+                                      cond.sample_rate_hz, &emsg)) {
+          std::fprintf(stderr, "WARN: failed to write %s: %s\n",
+                       path.string().c_str(), emsg.c_str());
+        }
       }
     }
 
@@ -727,5 +788,5 @@ int main(int argc, char** argv) {
   config.ns_vad_blend_low = args.ns_vad_blend_low;
   config.ns_vad_blend_high = args.ns_vad_blend_high;
   return RunSweep(args.conditions_dir, args.out_csv, args.out_wavs_dir,
-                  config);
+                  args.stage_wavs_dir, config);
 }
