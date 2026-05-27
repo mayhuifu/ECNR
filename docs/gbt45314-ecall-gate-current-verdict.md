@@ -51,6 +51,34 @@ The RNNoise blend sweep shows the B2 failure is tunable with the existing produc
 
 The remaining blocker is upstream of RNNoise: with `--ns-dry-blend 1.0`, which bypasses RNNoise, the double-talk near-end level is still heavily damaged before AGC. That points to AEC3 nonlinear echo suppression / double-talk mode control, not the RNNoise model alone.
 
+## Stage-Tap Evidence
+
+`ecnr_eval --stage-wavs` now writes per-stage WAVs so the double-talk loss can be localized without changing the production processing path.
+
+Command:
+
+```sh
+./build/ecnr_eval \
+  --run \
+  --conditions /tmp/gbt45314_stage_conditions \
+  --out /tmp/gbt45314_stage_default.csv \
+  --stage-wavs /tmp/gbt45314_stage_default \
+  --agc
+```
+
+Measured on `ecall_doubletalk_driver_minus6`:
+
+| Stage | Near-end level delta | Raw correlation | Echo-removed correlation |
+|---|---:|---:|---:|
+| `post_bf` | `+8.56 dB` | `0.370` | `0.982` |
+| `post_aec` | `-24.64 dB` | `-0.051` | `-0.051` |
+| `post_ns` | `-39.96 dB` | `0.002` | `0.002` |
+| `post_agc` | `-24.75 dB` | `0.002` | `0.002` |
+
+The near-end speech is present after beamforming and is lost at AEC3 output before RNNoise. A simple RNNoise preset cannot close the double-talk gap.
+
+An attempted WebRTC `mobile_mode` experiment was rejected: it fails far-end convergence and time-varying echo-path floors. A naive dry-mic blend during double-talk is also not release-safe because it risks leaking uncancelled far-end echo unless guarded by a validated double-talk detector.
+
 ## Commands
 
 ```sh
@@ -80,7 +108,7 @@ The failures are production-relevant:
 ## Next Fix Candidates
 
 1. Promote `--ns-dry-blend 0.20` into an explicit emergency-call preset candidate and validate it on customer cabin recordings.
-2. Add double-talk-aware AEC mode control. RNNoise-only tuning cannot recover speech already removed by AEC3 nonlinear suppression.
+2. Add double-talk-aware AEC mode control or replace the nonlinear suppression stage with a validated post-filter. RNNoise-only tuning cannot recover speech already removed by AEC3 nonlinear suppression.
 3. Re-run the gate after each tuning change. Do not lower the gate unless a vehicle/lab recording proves the fixture proxy is too strict.
 
 ## Lab Caveat
