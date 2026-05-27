@@ -576,7 +576,13 @@ PASS
 
 The reported-vs-true divergence on this synthetic fixture (~47 dB gap) is expected — AEC3's self-report isn't calibrated against the trivial-linear-echo case. On realistic cabin recordings the two should track within ~2 dB (ADR-0011 open assumption A3).
 
-**`--run --conditions DIR --out FILE.csv`** — sweep mode. Iterates `DIR/*/` subdirectories; each must contain `mic.wav` + `ref.wav` + `echo_only_mic.wav` (all same rate, all same length). Emits per-condition CSV rows. Phase 2 will feed this against the 134-case corpus; today it works against any compatible condition tree.
+**`--run --conditions DIR --out FILE.csv`** — sweep mode. Iterates `DIR/*/` subdirectories; each must contain `mic.wav` + `ref.wav` + `echo_only_mic.wav` (all same rate, all same length). `near_end_clean.wav` is optional and enables double-talk preservation metrics. Emits per-condition CSV rows. Phase 2 will feed this against the 134-case corpus; today it works against any compatible condition tree.
+
+`ecnr_eval` accepts the same RNNoise tuning controls as the bench/live tools:
+
+- `--ns-dry-blend 0.20` mixes 20% post-AEC dry signal back after RNNoise; useful for checking no-speech pumping versus echo headroom.
+- `--ns-vad-blend low,high` applies the existing RNNoise-VAD-gated blend range.
+- `--agc` enables the post-NS AGC2 stage used by the emergency-call gate runs.
 
 ```
 $ ./build/ecnr_eval --run --conditions ./conditions/synthetic --out results.csv
@@ -588,9 +594,33 @@ condition_id,config_name,sample_rate_hz,erle_reported_median_db,…,frames_skipp
 case_001_quiet_cabin,default-webrtc,16000,0.176,…,100
 ```
 
-CSV schema is a strict subset of the locked ADR-0011 §4 contract: the `config_hash` and `condition_hash` columns are deferred until the TOML sweep parser lands. Today there is one config: `default-webrtc`.
+CSV schema includes the ADR-0011 ERLE columns plus GB/T 45314 pre-compliance columns: frame latency / RTF, initial-convergence ERLE at 0/200/1000/1200/1500/5000 ms, steady/worst time-varying ERLE, no-speech noise level range, WebRTC residual-echo likelihood diagnostics when populated, and near-end preservation when `near_end_clean.wav` is present. The `config_hash` and `condition_hash` columns are deferred until the TOML sweep parser lands. The `config_name` records the active AGC and NS blend options for each run.
 
 The CMake option `ECNR_BUILD_EVAL` (default ON) gates this target; cross-builds set it OFF — the harness is a host-only tool.
+
+#### GB/T 45314 emergency-call pre-compliance gate
+
+[ADR-0013](docs/adr/0013-gbt45314-ecall-precompliance-gate.md) maps the China emergency-call audio requirements that can be measured from desk fixtures into a blocking software gate. It covers the ECNR-relevant parts of GB/T 45314-2025 section 5: implementation delay proxy, TCL/ERLE, initial convergence, time-varying echo path stability, double-talk preservation, and B2 no-speech noise stability.
+
+```sh
+python3 reference/gen_gbt45314_ecall_conditions.py
+
+./build/ecnr_eval \
+  --run \
+  --conditions conditions/gbt45314_ecall \
+  --out /tmp/gbt45314_ecall.csv \
+  --out-wavs /tmp/gbt45314_ecall_wavs \
+  --agc
+
+python3 reference/check_gbt45314_ecall_gate.py \
+  --in-csv /tmp/gbt45314_ecall.csv
+# Exit code:
+#   0 = GREEN (software pre-compliance floors met)
+#   1 = BLOCK (do not release for GB/T 45314 eCall validation)
+#   2 = WARN  (floors met, headroom targets pending)
+```
+
+This is not a certification substitute. HATS SLR/RLR, POI calibration, formal P.863 MOS-LQO, ETSI listening-effort, ETSI echo-impairment, and certified double-talk class grading still require the vehicle/lab setup.
 
 #### Augmenting eval CSVs with perceptual MOS (`reference/score_mos.py`)
 
