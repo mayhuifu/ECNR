@@ -206,10 +206,35 @@ def _aecmos_mel_transform(sample: np.ndarray) -> np.ndarray:
     return mel_db.T.astype(np.float32)
 
 
-def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
-                     fs: int, session: ort.InferenceSession) -> tuple[float, float, float]:
-    """Run AECMOS under talk_type='dt'. Returns (echo_mos, other_mos, dt_combined)."""
-    # Resample to 16 kHz if needed (chain emits 16 kHz today, but be safe).
+# Public talk_type names → Microsoft AECMOS internal names. We keep our
+# clearer mnemonics on the public surface (per_clip.csv etc.) and translate
+# at this boundary. Source: AECMOS/AECMOS_local/aecmos.py asserts
+# talk_type ∈ {'nst','st','dt'}.
+_TALK_TYPE_TO_MS = {"st_ne": "nst", "st_fe": "st", "dt": "dt"}
+
+
+def score_aecmos(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
+                 fs: int, session: ort.InferenceSession,
+                 talk_type: str = "dt") -> tuple[float, float, float]:
+    """Run AECMOS under the given talk_type.
+
+    talk_type ∈ {'dt', 'st_ne', 'st_fe'} per AEC-Challenge convention.
+    Returns (echo_mos, other_mos, dt_combined). For single-talk scenarios
+    only one of echo_mos / other_mos is meaningful; the caller is
+    responsible for NaN-ing the irrelevant column.
+    """
+    if talk_type not in _TALK_TYPE_TO_MS:
+        raise ValueError(f"talk_type must be one of "
+                         f"{list(_TALK_TYPE_TO_MS)}, got {talk_type!r}")
+    ms = _TALK_TYPE_TO_MS[talk_type]
+    # Derive the (ne_st, fe_st) flags per upstream:
+    #   nst → ne_st=1, fe_st=0
+    #   st  → ne_st=0, fe_st=1
+    #   dt  → ne_st=0, fe_st=0
+    ne_st = 1 if ms == "nst" else 0
+    fe_st = 1 if ms == "st"  else 0
+
+    # Resample to 16 kHz if needed.
     if fs != AECMOS_SR:
         lpb = _resample_to_16k(lpb, fs)
         mic = _resample_to_16k(mic, fs)
@@ -227,18 +252,19 @@ def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
     mic_f = _aecmos_mel_transform(mic)
     enh_f = _aecmos_mel_transform(enh)
 
-    # Scenario marker for talk_type='dt': two 20-row planes appended to
-    # the time axis. (1 - fe_st), (1 - ne_st) where for dt both are 0.
+    # Scenario marker: two 20-row tail planes per stream. Plane 2 always zeros.
+    # Plane 1 differs per stream:
+    #   mic:  (1 - fe_st)   → 1 for dt/st_ne, 0 for st_fe
+    #   lpb:  (1 - ne_st)   → 1 for dt/st_fe, 0 for st_ne
+    #   enh:  1.0           → always
     n_mels = mic_f.shape[1]
-    mic_f = np.concatenate((mic_f,
-                             np.ones((20, n_mels), dtype=np.float32),
-                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
-    lpb_f = np.concatenate((lpb_f,
-                             np.ones((20, n_mels), dtype=np.float32),
-                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
-    enh_f = np.concatenate((enh_f,
-                             np.ones((20, n_mels), dtype=np.float32),
-                             np.zeros((20, n_mels), dtype=np.float32)), axis=0)
+    zeros = np.zeros((20, n_mels), dtype=np.float32)
+    def _append(x, plane1_value: float):
+        plane1 = np.full((20, n_mels), plane1_value, dtype=np.float32)
+        return np.concatenate((x, plane1, zeros), axis=0)
+    mic_f = _append(mic_f, 1.0 - fe_st)
+    lpb_f = _append(lpb_f, 1.0 - ne_st)
+    enh_f = _append(enh_f, 1.0)
 
     # Stack channel-first: (1, 3, n_time, n_mels).
     feats = np.stack((lpb_f, mic_f, enh_f)).astype(np.float32)
@@ -251,6 +277,12 @@ def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
     deg_mos = float(result[0][1])
     dt_combined = 0.5 * (echo_mos + deg_mos)
     return echo_mos, deg_mos, dt_combined
+
+
+def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
+                     fs: int, session: ort.InferenceSession) -> tuple[float, float, float]:
+    """Back-compat shim. Use score_aecmos(..., talk_type='dt') in new code."""
+    return score_aecmos(lpb, mic, enh, fs, session, talk_type="dt")
 
 
 # ---- Main --------------------------------------------------------------------
