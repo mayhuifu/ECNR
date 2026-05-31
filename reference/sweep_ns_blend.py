@@ -58,9 +58,9 @@ except ImportError as e:
     sys.exit(2)
 
 
-# Default sweep — covers no-mitigation baseline, Step A (uniform blend),
-# Step B (VAD-gated blend across the full ladder), and NS-off ceiling.
-DEFAULT_CONFIGS = [
+# NS-blend sweep — no-mitigation baseline, Step A (uniform blend),
+# Step B (VAD-gated blend across the full ladder), NS-off ceiling.
+NS_CONFIGS = [
     ("rnnoise_default", []),
     ("step_a_blend_15", ["--ns-dry-blend", "0.15"]),
     ("step_a_blend_25", ["--ns-dry-blend", "0.25"]),
@@ -71,6 +71,22 @@ DEFAULT_CONFIGS = [
     ("step_b_vad_1p00", ["--ns-vad-blend", "0.0,1.00"]),
     ("ns_off_ceiling",  ["--ns-dry-blend", "1.0"]),
 ]
+
+# AGC max_gain_db sweep — AGC off baseline + AGC on at five gain caps.
+# Default WebRTC value is 50; we span 20-80 to find the operating point
+# that maximises dnsmos_sig without over-brightening background noise.
+AGC_CONFIGS = [
+    ("agc_off",             []),
+    ("agc_on_max_20",       ["--agc", "--agc-max-gain-db", "20"]),
+    ("agc_on_max_30",       ["--agc", "--agc-max-gain-db", "30"]),
+    ("agc_on_max_40",       ["--agc", "--agc-max-gain-db", "40"]),
+    ("agc_on_max_50_def",   ["--agc"]),  # WebRTC default
+    ("agc_on_max_60",       ["--agc", "--agc-max-gain-db", "60"]),
+    ("agc_on_max_80",       ["--agc", "--agc-max-gain-db", "80"]),
+]
+
+CONFIG_SETS = {"ns": NS_CONFIGS, "agc": AGC_CONFIGS}
+DEFAULT_CONFIGS = NS_CONFIGS  # back-compat alias for the original sweep behaviour
 
 # Scenario → AECMOS talk_type + applicable AECMOS columns.
 # Same shape as run_aec_challenge.py SCENARIO_MAP.
@@ -105,7 +121,7 @@ def _load_score_mos():
     return mod
 
 
-def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
+def run_corpus_sweep(args, configs, scoremos, dn_sess, ae_sess) -> int:
     """Iterate {config × clip} across the AEC-Challenge manifest.
     Aggregates per-(config, scenario, metric); writes per_clip.csv + summary.csv."""
     if not args.manifest.exists():
@@ -115,7 +131,7 @@ def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     per_clip = []  # one row per (config, clip)
-    for cfg_name, extra in DEFAULT_CONFIGS:
+    for cfg_name, extra in configs:
         cfg_enh_dir = args.out_dir / cfg_name
         cfg_enh_dir.mkdir(exist_ok=True)
         print(f"\n=== {cfg_name} ===")
@@ -163,7 +179,7 @@ def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
     summary = []
     metrics = ["dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
                "aecmos_echo", "aecmos_other", "aecmos_dt"]
-    for cfg_name, _ in DEFAULT_CONFIGS:
+    for cfg_name, _ in configs:
         for scn in sorted({c["scenario"] for c in per_clip}):
             rows_ = [c for c in per_clip
                      if c["config"] == cfg_name and c["scenario"] == scn
@@ -213,7 +229,7 @@ def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
         if "aecmos_dt"    in scn_cols: applicable.append("aecmos_dt")
         hdr = "  config".ljust(22) + "  ".join(m.rjust(13) for m in applicable) + "  verdict"
         print(hdr); print("-" * len(hdr))
-        for cfg_name, _ in DEFAULT_CONFIGS:
+        for cfg_name, _ in configs:
             cells = []
             fails = []
             for m in applicable:
@@ -232,7 +248,7 @@ def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
 
     # Exit 0 if some config clears every floor on every applicable-metric × scenario.
     any_pass = False
-    for cfg_name, _ in DEFAULT_CONFIGS:
+    for cfg_name, _ in configs:
         if all((s["p50"] >= FLOORS[s["metric"]])
                 for s in summary
                 if s["config"] == cfg_name and s["metric"] in FLOORS):
@@ -240,7 +256,7 @@ def run_corpus_sweep(args, scoremos, dn_sess, ae_sess) -> int:
     return 0 if any_pass else 1
 
 
-def run_single_fixture(args, scoremos, dn_sess, ae_sess) -> int:
+def run_single_fixture(args, configs, scoremos, dn_sess, ae_sess) -> int:
     """Original single-pair sweep — preserved for backward-compat."""
     mic, fs_m = scoremos._read_mono_float(args.mic)
     ref, fs_r = scoremos._read_mono_float(args.ref)
@@ -249,7 +265,7 @@ def run_single_fixture(args, scoremos, dn_sess, ae_sess) -> int:
 
     args.out_wavs.mkdir(parents=True, exist_ok=True)
     rows = []
-    for name, extra in DEFAULT_CONFIGS:
+    for name, extra in configs:
         out_wav = args.out_wavs / f"{name}.wav"
         cmd = [str(args.bench),
                "--mic", str(args.mic), "--ref", str(args.ref),
@@ -334,7 +350,10 @@ def main() -> int:
     ap.add_argument("--aecmos-model", required=True, type=Path)
     ap.add_argument("--bypass-beamformer", action="store_true", default=True,
                     help="pass --bypass-beamformer to ecnr_bench (mono input)")
+    ap.add_argument("--config-set", choices=list(CONFIG_SETS), default="ns",
+                    help="which sweep config list to run (default: ns)")
     args = ap.parse_args()
+    configs = CONFIG_SETS[args.config_set]
 
     # Mode detection — manifest takes precedence if both provided.
     corpus_mode = args.manifest is not None
@@ -352,8 +371,8 @@ def main() -> int:
     ae_sess = ort.InferenceSession(str(args.aecmos_model),
                                     providers=["CPUExecutionProvider"])
 
-    return run_corpus_sweep(args, scoremos, dn_sess, ae_sess) if corpus_mode \
-        else run_single_fixture(args, scoremos, dn_sess, ae_sess)
+    return run_corpus_sweep(args, configs, scoremos, dn_sess, ae_sess) if corpus_mode \
+        else run_single_fixture(args, configs, scoremos, dn_sess, ae_sess)
 
 
 if __name__ == "__main__":
