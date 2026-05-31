@@ -40,6 +40,8 @@ reference/synth/
 *.aac
 !reference/README.md
 !reference/**/*.md
+# AEC-Challenge subset: WAVs gitignored (caught by *.wav), MANIFEST.tsv tracked
+!datasets/**/MANIFEST.tsv
 !reference/noise/MANIFEST.tsv
 
 # Models — large binaries; commit pointers, not weights
