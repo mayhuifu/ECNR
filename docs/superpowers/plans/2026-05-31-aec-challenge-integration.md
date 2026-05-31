@@ -602,9 +602,10 @@ python3 reference/fetch_aec_challenge.py --bootstrap --out-root /tmp/aec_stub
 ```
 
 Expected:
-- 6 files downloaded (3 clips × mic + ref)
+- 5 acquisitions: 2 downloads for doubletalk (mic+lpb), 2 downloads for farend_singletalk (mic+lpb), 1 download + 1 synth for nearend_singletalk
 - `/tmp/aec_stub/MANIFEST.tsv` written with 3 rows
-- `ok=0  fetched=...  failed=0` (in bootstrap mode the validate counter doesn't apply; the final print is "Wrote ... with 3 entries.")
+- Final print: "Wrote /tmp/aec_stub/MANIFEST.tsv with 3 entries."
+- Files at top-level of `/tmp/aec_stub/` (flat layout per Addendum A1)
 
 If any download fails: revisit Task 0.1 — URL_PREFIX or filename may be wrong.
 
@@ -614,9 +615,9 @@ If any download fails: revisit Task 0.1 — URL_PREFIX or filename may be wrong.
 cat /tmp/aec_stub/MANIFEST.tsv
 ```
 
-Expected: 4-line TSV (header + 3 rows). Columns match `MANIFEST_COLS`. SHA256 values are 64 hex chars each. `source_url_prefix` is fully-qualified URLs.
+Expected: 4-line TSV (header + 3 rows). Six columns (`clip_id, scenario, mic_filename, ref_filename, sha256_mic, sha256_ref`). SHA256 values are 64 hex chars each. The `ne_*` row's `ref_filename` ends in `_lpb_silence.wav`.
 
-**No commit yet — restoring 30-entry list happens in Task 2.6.**
+**No commit yet — restoring 30-entry list happens in Task 2.5.**
 
 ---
 
@@ -632,30 +633,30 @@ python3 reference/fetch_aec_challenge.py --out-root /tmp/aec_stub
 
 Expected:
 - All 6 files reported as "ok" (cache hit, SHA matches)
-- `ok=6  fetched=0  failed=0`
+- `ok=6  acquired=0  failed=0`
 
-- [ ] **Step 2: Delete one file, re-run, expect fetch**
+- [ ] **Step 2: Delete one file, re-run, expect re-acquire**
 
 ```bash
-rm /tmp/aec_stub/doubletalk/*_mic.wav  # one mic file
+rm /tmp/aec_stub/*_doubletalk_mic.wav  # one mic file (flat layout)
 python3 reference/fetch_aec_challenge.py --out-root /tmp/aec_stub
 ```
 
 Expected:
 - One "fetching ..." line
-- `ok=5  fetched=1  failed=0`
+- `ok=5  acquired=1  failed=0`
 
 - [ ] **Step 3: Corrupt one file, re-run, expect SHA mismatch handling**
 
 ```bash
-echo "corrupt" > /tmp/aec_stub/doubletalk/*_mic.wav  # overwrite a real file
+echo "corrupt" > /tmp/aec_stub/*_doubletalk_mic.wav  # overwrite the real file
 python3 reference/fetch_aec_challenge.py --out-root /tmp/aec_stub
 ```
 
 Expected:
-- "SHA mismatch: ... — re-downloading"
+- "SHA mismatch: ... — re-acquiring"
 - "fetching ..."
-- `ok=5  fetched=1  failed=0` (re-download succeeds, SHA passes)
+- `ok=5  acquired=1  failed=0` (re-download succeeds, SHA passes)
 
 **No commit yet.**
 
@@ -698,10 +699,10 @@ git check-ignore -v -- datasets/aec_challenge/MANIFEST.tsv 2>&1
 Expected: empty output (= NOT ignored = will be tracked).
 
 ```bash
-git check-ignore -v -- datasets/aec_challenge/doubletalk/foo.wav
+git check-ignore -v -- datasets/aec_challenge/some_guid_doubletalk_mic.wav
 ```
 
-Expected: prints `.gitignore:NN:*.wav  datasets/aec_challenge/doubletalk/foo.wav` (= ignored by *.wav rule).
+Expected: prints `.gitignore:NN:*.wav  datasets/aec_challenge/some_guid_doubletalk_mic.wav` (= ignored by *.wav rule).
 
 **No commit yet.**
 
@@ -724,18 +725,22 @@ python3 reference/fetch_aec_challenge.py --bootstrap
 ```
 
 Expected:
-- 60 files downloaded (30 clips × mic + ref), each ~320 KB → total ~20 MB
+- 50 downloads (10 doubletalk × 2 + 10 farend_singletalk × 2 + 10 nearend_singletalk × 1 mic) + 10 silence-synth WAVs for nearend_singletalk lpb = 60 cached files total
+- Each downloaded WAV ~320 KB → total ~16 MB
 - ~30-60 seconds wall time on a normal connection
 - Final print: "Wrote datasets/aec_challenge/MANIFEST.tsv with 30 entries."
 
-- [ ] **Step 3: Sanity-check the produced tree**
+- [ ] **Step 3: Sanity-check the produced tree (flat layout per spec Addendum A1)**
 
 ```bash
-ls datasets/aec_challenge/
-ls datasets/aec_challenge/doubletalk/ | wc -l           # → 20 (10 mic + 10 ref)
-ls datasets/aec_challenge/nearend_singletalk/ | wc -l   # → 20
-ls datasets/aec_challenge/farend_singletalk/ | wc -l    # → 20
-wc -l datasets/aec_challenge/MANIFEST.tsv               # → 31 (header + 30)
+ls datasets/aec_challenge/ | wc -l                                     # → 61 (MANIFEST.tsv + 60 WAVs)
+ls datasets/aec_challenge/*_doubletalk_mic.wav | wc -l                 # → 10
+ls datasets/aec_challenge/*_doubletalk_lpb.wav | wc -l                 # → 10
+ls datasets/aec_challenge/*_farend_singletalk_mic.wav | wc -l          # → 10
+ls datasets/aec_challenge/*_farend_singletalk_lpb.wav | wc -l          # → 10
+ls datasets/aec_challenge/*_nearend_singletalk_mic.wav | wc -l         # → 10
+ls datasets/aec_challenge/*_nearend_singletalk_lpb_silence.wav | wc -l # → 10 (synthesized)
+wc -l datasets/aec_challenge/MANIFEST.tsv                              # → 31 (header + 30)
 ```
 
 - [ ] **Step 4: Re-run validate-and-fetch to confirm idempotency**
@@ -744,7 +749,7 @@ wc -l datasets/aec_challenge/MANIFEST.tsv               # → 31 (header + 30)
 python3 reference/fetch_aec_challenge.py
 ```
 
-Expected: `ok=60  fetched=0  failed=0`. Sub-second runtime.
+Expected: `ok=60  acquired=0  failed=0`. Sub-second runtime.
 
 - [ ] **Step 5: Commit**
 
@@ -867,14 +872,15 @@ def read_manifest(path: Path) -> list[dict]:
 
 
 def verify_cache(rows: list[dict], root: Path) -> None:
-    """Exit 2 with a useful message if any clip is missing or SHA-mismatched."""
+    """Exit 2 with a useful message if any clip is missing or SHA-mismatched.
+    Layout is flat (no scenario subdirs) — see spec Addendum A1."""
     missing = []
     for r in rows:
         for which in ("mic", "ref"):
             fn = r[f"{which}_filename"]
-            dest = root / r["scenario"] / fn
+            dest = root / fn
             if not dest.exists() or sha256_of(dest) != r[f"sha256_{which}"]:
-                missing.append(f"  {r['scenario']}/{fn}")
+                missing.append(f"  {fn}")
     if missing:
         print(f"Cache miss / SHA mismatch on {len(missing)} files. Run:\n"
               f"  python3 reference/fetch_aec_challenge.py\n\n"
@@ -933,13 +939,13 @@ Expected second invocation: `OK: 30 clips verified in cache` (cache populated by
 - [ ] **Step 3: Verify cache-miss path**
 
 ```bash
-mv datasets/aec_challenge/doubletalk/*_mic.wav /tmp/      # temporarily move
+mv datasets/aec_challenge/*_doubletalk_mic.wav /tmp/      # temporarily move all 10
 python3 reference/run_aec_challenge.py \
     --dnsmos-model models/dnsmos_p835.onnx \
     --aecmos-model models/aecmos.onnx \
     --out-dir /tmp/run_smoke
 # Expected: "Cache miss / SHA mismatch on N files..." + exit 2
-mv /tmp/*_mic.wav datasets/aec_challenge/doubletalk/      # restore
+mv /tmp/*_doubletalk_mic.wav datasets/aec_challenge/      # restore
 ```
 
 **No commit yet — runner is incomplete.**
@@ -999,8 +1005,8 @@ Replace the placeholder comment in `main()` with:
     per_clip = []
     for r in rows:
         scn = r["scenario"]
-        mic = args.datasets_root / scn / r["mic_filename"]
-        ref = args.datasets_root / scn / r["ref_filename"]
+        mic = args.datasets_root / r["mic_filename"]   # flat layout, spec Addendum A1
+        ref = args.datasets_root / r["ref_filename"]
         enh = args.out_dir / f"{r['clip_id']}_enh.wav"  # top-level per spec
         b = run_bench(args.bench, mic, ref, enh, args.agc, args.bench_flags)
         if b["status"] != "ok":
@@ -1055,8 +1061,8 @@ def score_clip(clip_row: dict, enh_wav: Path,
     if out["status"] != "ok" or not enh_wav.exists():
         return out
     scn = clip_row["scenario"]
-    mic = datasets_root / scn / clip_row["mic_filename"]
-    ref = datasets_root / scn / clip_row["ref_filename"]
+    mic = datasets_root / clip_row["mic_filename"]   # flat layout, spec Addendum A1
+    ref = datasets_root / clip_row["ref_filename"]
     try:
         enh, fs_e = scoremos._read_mono_float(enh_wav)
         mic_sig, _ = scoremos._read_mono_float(mic)
@@ -1094,8 +1100,8 @@ Update `main()` to load ONNX sessions + score_mos module, then call `score_clip`
     per_clip = []
     for r in rows:
         scn = r["scenario"]
-        mic = args.datasets_root / scn / r["mic_filename"]
-        ref = args.datasets_root / scn / r["ref_filename"]
+        mic = args.datasets_root / r["mic_filename"]   # flat layout, spec Addendum A1
+        ref = args.datasets_root / r["ref_filename"]
         enh = args.out_dir / f"{r['clip_id']}_enh.wav"  # top-level per spec
         b = run_bench(args.bench, mic, ref, enh, args.agc, args.bench_flags)
         s = score_clip({**r, "status": b["status"]}, enh,
