@@ -143,18 +143,14 @@ talk_type='st_fe' → (plane1=<...>, plane2=<...>)               # from referenc
 
 - [ ] **Step 1: Rewrite score_aecmos_dt as score_aecmos + back-compat shim**
 
-Replace lines 209-253 with:
+Replace lines 209-253 with the code below. The scenario-marker construction is **per-stream** (mic/lpb/enh each get different plane-1 values per `talk_type`) — verified against `microsoft/AEC-Challenge/AECMOS/AECMOS_local/aecmos.py` in `/tmp/aec_recon.md` Task 0.3.
 
 ```python
-# Scenario marker per AECMOS reference. The (plane1, plane2) tuple
-# specifies which of the two 20-row tail planes is all-ones vs all-zeros.
-# Values lifted from microsoft/AEC-Challenge/AECMOS/AECMOS_local/aecmos.py
-# (see /tmp/aec_recon.md Task 0.3 for the source).
-_AECMOS_SCENARIO_MARKER = {
-    "dt":    (1, 0),   # doubletalk — both fe and ne active
-    "st_ne": (?, ?),   # near-end single-talk — fill from Task 0.3
-    "st_fe": (?, ?),   # far-end single-talk — fill from Task 0.3
-}
+# Public talk_type names → Microsoft AECMOS internal names. We keep our
+# clearer mnemonics on the public surface (per_clip.csv etc.) and translate
+# at this boundary. Source: AECMOS/AECMOS_local/aecmos.py asserts
+# talk_type ∈ {'nst','st','dt'}.
+_TALK_TYPE_TO_MS = {"st_ne": "nst", "st_fe": "st", "dt": "dt"}
 
 
 def score_aecmos(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
@@ -167,10 +163,16 @@ def score_aecmos(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
     only one of echo_mos / other_mos is meaningful; the caller is
     responsible for NaN-ing the irrelevant column.
     """
-    if talk_type not in _AECMOS_SCENARIO_MARKER:
+    if talk_type not in _TALK_TYPE_TO_MS:
         raise ValueError(f"talk_type must be one of "
-                         f"{list(_AECMOS_SCENARIO_MARKER)}, got {talk_type!r}")
-    p1, p2 = _AECMOS_SCENARIO_MARKER[talk_type]
+                         f"{list(_TALK_TYPE_TO_MS)}, got {talk_type!r}")
+    ms = _TALK_TYPE_TO_MS[talk_type]
+    # Derive the (ne_st, fe_st) flags per upstream:
+    #   nst → ne_st=1, fe_st=0
+    #   st  → ne_st=0, fe_st=1
+    #   dt  → ne_st=0, fe_st=0
+    ne_st = 1 if ms == "nst" else 0
+    fe_st = 1 if ms == "st"  else 0
 
     # Resample to 16 kHz if needed.
     if fs != AECMOS_SR:
@@ -190,16 +192,19 @@ def score_aecmos(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
     mic_f = _aecmos_mel_transform(mic)
     enh_f = _aecmos_mel_transform(enh)
 
-    # Scenario marker: two 20-row tail planes; values per talk_type table.
+    # Scenario marker: two 20-row tail planes per stream. Plane 2 always zeros.
+    # Plane 1 differs per stream:
+    #   mic:  (1 - fe_st)   → 1 for dt/st_ne, 0 for st_fe
+    #   lpb:  (1 - ne_st)   → 1 for dt/st_fe, 0 for st_ne
+    #   enh:  1.0           → always
     n_mels = mic_f.shape[1]
-    def _append_marker(x):
-        plane1 = (np.ones if p1 else np.zeros)((20, n_mels), dtype=np.float32)
-        plane2 = (np.ones if p2 else np.zeros)((20, n_mels), dtype=np.float32)
-        return np.concatenate((x, plane1, plane2), axis=0)
-
-    mic_f = _append_marker(mic_f)
-    lpb_f = _append_marker(lpb_f)
-    enh_f = _append_marker(enh_f)
+    zeros = np.zeros((20, n_mels), dtype=np.float32)
+    def _append(x, plane1_value: float):
+        plane1 = np.full((20, n_mels), plane1_value, dtype=np.float32)
+        return np.concatenate((x, plane1, zeros), axis=0)
+    mic_f = _append(mic_f, 1.0 - fe_st)
+    lpb_f = _append(lpb_f, 1.0 - ne_st)
+    enh_f = _append(enh_f, 1.0)
 
     # Stack channel-first: (1, 3, n_time, n_mels).
     feats = np.stack((lpb_f, mic_f, enh_f)).astype(np.float32)
@@ -219,8 +224,6 @@ def score_aecmos_dt(lpb: np.ndarray, mic: np.ndarray, enh: np.ndarray,
     """Back-compat shim. Use score_aecmos(..., talk_type='dt') in new code."""
     return score_aecmos(lpb, mic, enh, fs, session, talk_type="dt")
 ```
-
-Fill in the `(?, ?)` placeholders for `st_ne` and `st_fe` from `/tmp/aec_recon.md` (Task 0.3 output).
 
 - [ ] **Step 2: Verify parity — old code path still produces identical numbers**
 
@@ -319,6 +322,8 @@ EOF
 
 - [ ] **Step 1: Write the script skeleton**
 
+Local layout is **flat** (mirrors upstream — see spec Addendum A1). MANIFEST.tsv has six columns (no `source_url_prefix` — that's a script constant). ST_NE clips have **no upstream lpb file**; the fetcher synthesizes a zero-filled lpb WAV to keep the schema rectangular (spec Addendum A2).
+
 ```python
 #!/usr/bin/env python3
 """Fetch the AEC-Challenge real-recordings 30-clip subset.
@@ -329,12 +334,11 @@ Modes:
   (default)     Read existing MANIFEST.tsv. For each row, check if local
                 file exists with matching SHA256; download if not.
 
-Output tree:
+Output tree (flat — mirrors upstream layout per spec Addendum A1):
   datasets/aec_challenge/
-    MANIFEST.tsv                       (committed; defines the subset)
-    doubletalk/<filename>              (gitignored *.wav)
-    nearend_singletalk/<filename>
-    farend_singletalk/<filename>
+    MANIFEST.tsv                                            (committed; defines the subset)
+    <GUID>_<scenario>_<mic|lpb>.wav                         (gitignored)
+    <GUID>_nearend_singletalk_lpb_silence.wav               (gitignored; synthesized — no upstream lpb)
 
 Per the design spec at
 docs/superpowers/specs/2026-05-31-aec-challenge-integration-design.md.
@@ -345,30 +349,51 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import struct
 import sys
 import urllib.request
+import wave
 from pathlib import Path
 
-# URL prefix per scenario — locked in Task 0.1 against the AEC-Challenge
-# repo's download script. Update here if upstream rotates.
-URL_PREFIX = "<FROM_TASK_0_1>"  # e.g. https://aecchallengepublic.blob.core.windows.net/aecchallenge/datasets/real/
+# GitHub LFS-media endpoint — locked in Task 0.1 against the AEC-Challenge
+# repo. The upstream tree under datasets/real/ is flat (no scenario
+# subdirs); we mirror that locally. Update here if upstream rotates.
+URL_PREFIX = "https://media.githubusercontent.com/media/microsoft/AEC-Challenge/main/datasets/real/"
 
 # 30-clip subset locked in Task 0.2 — first 10 alphabetical per scenario.
-# Each tuple: (scenario_folder, clip_id, mic_filename, ref_filename)
+# Each tuple: (scenario, clip_id, guid).
+# Filenames derived: f"{guid}_{scenario}_{channel}.wav" for channel ∈ {mic, lpb}.
+# nearend_singletalk has NO upstream lpb (Addendum A2) → lpb is synthesized
+# as f"{guid}_nearend_singletalk_lpb_silence.wav" (zero-filled, same length as mic).
 CLIP_LIST = [
-    # doubletalk (10)
-    ("doubletalk", "dt_001", "<filename>_mic.wav", "<filename>_lpb.wav"),
-    # ... 9 more ...
-    # nearend_singletalk (10)
-    ("nearend_singletalk", "ne_001", "<filename>_mic.wav", "<filename>_lpb.wav"),
-    # ... 9 more ...
+    # doubletalk (10) — paste the 10 GUIDs from /tmp/aec_recon.md Task 0.2
+    ("doubletalk",         "dt_01", "-2jLGNCgf0WDpKMY2iup7g"),
+    ("doubletalk",         "dt_02", "-3Jxai1udE6V32_c-aUJFA"),
+    # ... 8 more from recon notes ...
+
     # farend_singletalk (10)
-    ("farend_singletalk", "fe_001", "<filename>_mic.wav", "<filename>_lpb.wav"),
-    # ... 9 more ...
+    ("farend_singletalk",  "fe_01", "-0AcvGNEdEK-DQGxWmtq2Q"),
+    # ... 9 more from recon notes ...
+
+    # nearend_singletalk (10) — lpb is synthesized
+    ("nearend_singletalk", "ne_01", "-0AcvGNEdEK-DQGxWmtq2Q"),
+    # ... 9 more from recon notes ...
 ]
 
 MANIFEST_COLS = ["clip_id", "scenario", "mic_filename", "ref_filename",
-                 "sha256_mic", "sha256_ref", "source_url_prefix"]
+                 "sha256_mic", "sha256_ref"]
+
+SR_HZ = 16000  # AEC-Challenge clips are 16 kHz mono 16-bit
+
+
+def mic_filename(scenario: str, guid: str) -> str:
+    return f"{guid}_{scenario}_mic.wav"
+
+
+def ref_filename(scenario: str, guid: str) -> str:
+    if scenario == "nearend_singletalk":
+        return f"{guid}_nearend_singletalk_lpb_silence.wav"
+    return f"{guid}_{scenario}_lpb.wav"
 
 
 def sha256_of(path: Path) -> str:
@@ -395,27 +420,66 @@ def download(url: str, dest: Path) -> None:
         raise
 
 
+def write_silence_wav(dest: Path, n_samples: int) -> None:
+    """Write a zero-filled int16 mono 16 kHz WAV. Atomic via .part swap."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with wave.open(str(tmp), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR_HZ)
+            w.writeframes(b"\x00\x00" * n_samples)
+        tmp.rename(dest)
+    except Exception:
+        if tmp.exists(): tmp.unlink()
+        raise
+
+
+def _wav_n_samples(path: Path) -> int:
+    with wave.open(str(path), "rb") as w:
+        return w.getnframes()
+
+
 def bootstrap(out_root: Path, manifest_path: Path) -> int:
-    """Download all CLIP_LIST entries, compute SHAs, write MANIFEST.tsv."""
+    """Download all CLIP_LIST entries, synthesize ST_NE silence,
+    compute SHAs, write MANIFEST.tsv."""
     rows = []
-    for scenario, clip_id, mic_fn, ref_fn in CLIP_LIST:
-        url_prefix = f"{URL_PREFIX.rstrip('/')}/{scenario}/"
-        dest_dir = out_root / scenario
-        for fn in (mic_fn, ref_fn):
-            dest = dest_dir / fn
-            if not dest.exists():
-                print(f"  fetching {scenario}/{fn} ...")
-                download(url_prefix + fn, dest)
+    for scenario, clip_id, guid in CLIP_LIST:
+        mic_fn = mic_filename(scenario, guid)
+        ref_fn = ref_filename(scenario, guid)
+        mic_dest = out_root / mic_fn
+        ref_dest = out_root / ref_fn
+
+        # mic: always a real download
+        if not mic_dest.exists():
+            print(f"  fetching {mic_fn} ...")
+            download(URL_PREFIX + mic_fn, mic_dest)
+        else:
+            print(f"  cached   {mic_fn}")
+
+        # ref: download from upstream OR synthesize silence for nearend_singletalk
+        if scenario == "nearend_singletalk":
+            if not ref_dest.exists():
+                n = _wav_n_samples(mic_dest)
+                print(f"  synth    {ref_fn}  ({n} samples = {n/SR_HZ:.2f}s silence)")
+                write_silence_wav(ref_dest, n)
             else:
-                print(f"  cached  {scenario}/{fn}")
+                print(f"  cached   {ref_fn}  (synth)")
+        else:
+            if not ref_dest.exists():
+                print(f"  fetching {ref_fn} ...")
+                download(URL_PREFIX + ref_fn, ref_dest)
+            else:
+                print(f"  cached   {ref_fn}")
+
         rows.append({
             "clip_id": clip_id,
             "scenario": scenario,
             "mic_filename": mic_fn,
             "ref_filename": ref_fn,
-            "sha256_mic": sha256_of(dest_dir / mic_fn),
-            "sha256_ref": sha256_of(dest_dir / ref_fn),
-            "source_url_prefix": url_prefix,
+            "sha256_mic": sha256_of(mic_dest),
+            "sha256_ref": sha256_of(ref_dest),
         })
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with open(manifest_path, "w", newline="") as f:
@@ -428,7 +492,10 @@ def bootstrap(out_root: Path, manifest_path: Path) -> int:
 
 
 def validate_and_fetch(out_root: Path, manifest_path: Path) -> int:
-    """Read MANIFEST.tsv. For each row, verify-or-fetch each WAV."""
+    """Read MANIFEST.tsv. For each row, verify-or-fetch each WAV.
+
+    For nearend_singletalk rows, the lpb file is regenerated as silence
+    (matching mic length) if missing or SHA-mismatched."""
     if not manifest_path.exists():
         print(f"MANIFEST.tsv not found at {manifest_path} — run with --bootstrap first",
               file=sys.stderr)
@@ -438,30 +505,42 @@ def validate_and_fetch(out_root: Path, manifest_path: Path) -> int:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
             scenario = row["scenario"]
-            url_prefix = row["source_url_prefix"]
             for which in ("mic", "ref"):
                 fn = row[f"{which}_filename"]
                 expected_sha = row[f"sha256_{which}"]
-                dest = out_root / scenario / fn
+                dest = out_root / fn
                 if dest.exists() and sha256_of(dest) == expected_sha:
                     n_ok += 1
                     continue
                 if dest.exists():
-                    print(f"  SHA mismatch: {scenario}/{fn} — re-downloading", file=sys.stderr)
+                    print(f"  SHA mismatch: {fn} — re-acquiring", file=sys.stderr)
                     dest.unlink()
-                print(f"  fetching {scenario}/{fn} ...")
+                # Synthesize silence for ST_NE lpb; download everything else.
+                is_synth = (which == "ref" and scenario == "nearend_singletalk")
                 try:
-                    download(url_prefix + fn, dest)
+                    if is_synth:
+                        mic_dest = out_root / row["mic_filename"]
+                        if not mic_dest.exists() or sha256_of(mic_dest) != row["sha256_mic"]:
+                            print(f"  ERROR: cannot synth {fn} — mic not present/valid yet",
+                                  file=sys.stderr)
+                            n_failed += 1
+                            continue
+                        n = _wav_n_samples(mic_dest)
+                        print(f"  synth    {fn}  ({n} samples)")
+                        write_silence_wav(dest, n)
+                    else:
+                        print(f"  fetching {fn} ...")
+                        download(URL_PREFIX + fn, dest)
                     if sha256_of(dest) != expected_sha:
-                        print(f"  ERROR: downloaded file has wrong SHA256: {scenario}/{fn}",
+                        print(f"  ERROR: acquired file has wrong SHA256: {fn}",
                               file=sys.stderr)
                         n_failed += 1
                         continue
                     n_fetched += 1
                 except Exception as e:
-                    print(f"  ERROR: download failed: {scenario}/{fn}: {e}", file=sys.stderr)
+                    print(f"  ERROR: acquire failed: {fn}: {e}", file=sys.stderr)
                     n_failed += 1
-    print(f"\nok={n_ok}  fetched={n_fetched}  failed={n_failed}")
+    print(f"\nok={n_ok}  acquired={n_fetched}  failed={n_failed}")
     return 0 if n_failed == 0 else 2
 
 
@@ -486,11 +565,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 2: Fill in URL_PREFIX and CLIP_LIST**
+- [ ] **Step 2: Fill in the full 30-entry CLIP_LIST from recon notes**
 
-From `/tmp/aec_recon.md`:
-- Set `URL_PREFIX` to the value from Task 0.1.
-- Replace the placeholder tuples in `CLIP_LIST` with the 30 entries from Task 0.2.
+From `/tmp/aec_recon.md` Task 0.2, paste all 30 `(scenario, clip_id, guid)` tuples in the order: 10 `doubletalk` then 10 `farend_singletalk` then 10 `nearend_singletalk`. URL_PREFIX is already correct from recon.
 
 - [ ] **Step 3: Sanity-check the script parses**
 

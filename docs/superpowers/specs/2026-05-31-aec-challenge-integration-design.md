@@ -215,3 +215,71 @@ python3 reference/run_aec_challenge.py \
 - [ADR-0011](../../adr/0011-aec3-tuning-methodology.md) — the existing eval methodology (we're sitting alongside, not replacing)
 - [ADR-0012](../../adr/0012-phase-1-acceptance-bar.md) — the acceptance bar this corpus will eventually feed back into
 - [`docs/phase-1-acceptance-grade.md`](../../phase-1-acceptance-grade.md) — the previous first-run grade against the rejected ad-hoc fixtures
+
+---
+
+## Addendum — Phase 0 recon findings + decisions (2026-05-31)
+
+Phase 0 reconnaissance against the live AEC-Challenge repo surfaced four design assumptions in the body above that turned out to be wrong. Decisions captured here rather than re-litigating the body so the original design intent stays auditable.
+
+### A1: Folder layout is **flat**, not nested by scenario
+
+The body's `architecture` and `subset & manifest mechanics` sections imagined:
+```
+datasets/aec_challenge/
+  doubletalk/<filename>.wav
+  nearend_singletalk/<filename>.wav
+  farend_singletalk/<filename>.wav
+```
+
+The upstream is actually flat: `datasets/real/<GUID>_<scenario>[_with_movement]_<mic|lpb>.wav`, all in one directory. We will **mirror upstream's flat layout locally**:
+```
+datasets/aec_challenge/
+  MANIFEST.tsv
+  <GUID>_<scenario>_<mic|lpb>.wav    # ~60 files flat
+```
+
+**MANIFEST schema change:** drop the `source_url_prefix` column (it would be the same string in all 30 rows). Replace with a script-level constant in `fetch_aec_challenge.py`:
+```python
+URL_PREFIX = "https://media.githubusercontent.com/media/microsoft/AEC-Challenge/main/datasets/real/"
+```
+If upstream ever splits scenarios into subdirs, the fetcher gets a small edit; manifest regenerates.
+
+### A2: `nearend_singletalk` clips have no lpb file upstream
+
+The chain's `ecnr_bench` requires `--ref`. ST_NE clips have no far-end signal by design. **The fetcher synthesizes a zero-filled lpb WAV** for ST_NE rows: after downloading the mic, derive its length, write `<GUID>_nearend_singletalk_lpb_silence.wav` filled with int16 zeros of matching length, compute its real SHA256, record both in MANIFEST.tsv. Runner stays scenario-agnostic — every row has a real cached `ref_filename` with a verifiable SHA.
+
+### A3: AECMOS `talk_type` vocabulary differs
+
+Microsoft's `aecmos.py` accepts `talk_type ∈ {'nst', 'st', 'dt'}`. Our spec uses the clearer mnemonics `{'st_ne', 'st_fe', 'dt'}`. **The wrapper translates** at the boundary:
+```python
+_TALK_TYPE_TO_MS = {'st_ne': 'nst', 'st_fe': 'st', 'dt': 'dt'}
+```
+Our `per_clip.csv` / public surface uses our names; Microsoft's names never leak out.
+
+### A4: Scenario marker is **per-stream**, not global
+
+The body's `score_mos.py change` snippet imagined a single `(plane1, plane2)` tuple per `talk_type`, applied identically to mic/lpb/enh. The actual upstream construction (verified in `AECMOS/AECMOS_local/aecmos.py`) is per-stream:
+
+```python
+fe_st = 1 if talk_type == 'st_fe' else 0
+ne_st = 1 if talk_type == 'st_ne' else 0
+# Plane 1 differs per stream; plane 2 is always zeros.
+mic_plane1 = 1.0 - fe_st   # zeros if st_fe, else ones
+lpb_plane1 = 1.0 - ne_st   # zeros if st_ne, else ones
+enh_plane1 = 1.0           # always ones
+```
+
+The existing `score_aecmos_dt` code in `score_mos.py:230-241` happens to be correct because for DT all three planes resolve to ones; it's just not generalizable. The new `score_aecmos(...)` uses the factored form above.
+
+### MANIFEST schema (after A1 + A2)
+
+```
+clip_id    scenario              mic_filename                                              ref_filename                                                       sha256_mic   sha256_ref
+dt_01      doubletalk            -2jLGNCgf0WDpKMY2iup7g_doubletalk_mic.wav                 -2jLGNCgf0WDpKMY2iup7g_doubletalk_lpb.wav                          <64hex>      <64hex>
+ne_01      nearend_singletalk    -0AcvGNEdEK-DQGxWmtq2Q_nearend_singletalk_mic.wav         -0AcvGNEdEK-DQGxWmtq2Q_nearend_singletalk_lpb_silence.wav          <64hex>      <64hex>
+fe_01      farend_singletalk     -0AcvGNEdEK-DQGxWmtq2Q_farend_singletalk_mic.wav          -0AcvGNEdEK-DQGxWmtq2Q_farend_singletalk_lpb.wav                   <64hex>      <64hex>
+…
+```
+
+Six columns (was seven). Both `mic_filename` and `ref_filename` are always real local filenames; ST_NE's `_lpb_silence.wav` is a fetcher-synthesized zero WAV, not a download.
