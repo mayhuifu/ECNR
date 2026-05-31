@@ -36,8 +36,12 @@ class Agc2Adapter {
   Agc2Adapter& operator=(const Agc2Adapter&) = delete;
 
   // sample_rate_hz must satisfy IsSupportedSampleRate (16000 or 48000).
+  // max_gain_db caps the adaptive-digital gain — defaults to 50 dB
+  // (WebRTC's default). Lower values cap noise-floor amplification
+  // between speech bursts; useful when default AGC over-brightens
+  // background noise on already-quiet output. Range: 0 to 100 dB.
   // Returns false on unsupported rate or if APM construction fails.
-  bool Init(int sample_rate_hz);
+  bool Init(int sample_rate_hz, float max_gain_db = 50.0f);
 
   // Drop adapted state (re-runs APM Initialize). Not real-time safe — call
   // only between streams (session boundary), never on the audio thread

@@ -43,6 +43,11 @@ struct Args {
   // pass --agc to normalise output to ~−19 dBFS RMS for 3GPP TS 26.131
   // hands-free SLR compliance.
   bool agc_enabled = false;
+  // Override AGC2's adaptive-digital max_gain_db cap. WebRTC default 50.
+  // Only meaningful when --agc is also set. Used by tuning sweeps to
+  // pick an operating point that balances loudness against noise-floor
+  // amplification between speech bursts. <0 = use chain default (50).
+  float agc_max_gain_db = -1.0f;
 };
 
 void PrintUsage(const char* prog) {
@@ -61,7 +66,10 @@ void PrintUsage(const char* prog) {
                "                       across channels (no spatial information).\n"
                "  --agc                enable post-NS AGC2 stage (ADR-0001). Normalises\n"
                "                       output to ~-19 dBFS RMS for VoLTE/VoNR uplink-\n"
-               "                       loudness compliance (3GPP TS 26.131 SLR target).\n",
+               "                       loudness compliance (3GPP TS 26.131 SLR target).\n"
+               "  --agc-max-gain-db N  override AGC2 adaptive-digital max_gain_db cap\n"
+               "                       (WebRTC default = 50). Range 0..100. Only\n"
+               "                       meaningful with --agc.\n",
                prog);
 }
 
@@ -99,6 +107,20 @@ bool ParseArgs(int argc, char** argv, Args* a) {
       a->bypass_beamformer = true;
     } else if (flag == "--agc") {
       a->agc_enabled = true;
+    } else if (flag == "--agc-max-gain-db" && i + 1 < argc) {
+      try {
+        a->agc_max_gain_db = std::stof(argv[++i]);
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --agc-max-gain-db value '%s': %s\n",
+                     argv[i], e.what());
+        return false;
+      }
+      if (a->agc_max_gain_db < 0.0f || a->agc_max_gain_db > 100.0f) {
+        std::fprintf(stderr,
+                     "--agc-max-gain-db must be in [0, 100]; got %.2f\n",
+                     a->agc_max_gain_db);
+        return false;
+      }
     } else if (flag == "-h" || flag == "--help") {
       return false;
     } else {
@@ -176,6 +198,11 @@ int main(int argc, char** argv) {
   placeholder_geom.speed_of_sound_mps = 343.0f;
 
   ecnr::AecChain chain;
+  // Apply AGC max_gain_db override BEFORE Init — the value is baked into
+  // APM config at Init time and cannot be changed on a running chain.
+  if (args.agc_max_gain_db >= 0.0f) {
+    chain.SetAgcMaxGainDb(args.agc_max_gain_db);
+  }
   const bool chain_ok = args.bypass_beamformer
       ? chain.Init(sample_rate_hz, num_mics)
       : chain.Init(sample_rate_hz, num_mics, placeholder_geom);
@@ -275,6 +302,9 @@ int main(int argc, char** argv) {
               file_mic_channels,
               args.bypass_beamformer ? "bypass" : "dsb",
               args.agc_enabled ? "on" : "off");
+  if (args.agc_enabled && args.agc_max_gain_db >= 0.0f) {
+    std::printf("(max_gain_db=%.0f)", args.agc_max_gain_db);
+  }
   if (s.echo_return_loss_enhancement_db.has_value()) {
     std::printf("  erle_db=%.2f", *s.echo_return_loss_enhancement_db);
   } else {

@@ -143,6 +143,16 @@ class AecChain {
   // be called between frames.
   void SetAgcEnabled(bool enabled);
 
+  // Override AGC2's adaptive-digital max_gain_db cap (WebRTC default = 50).
+  // Lower values reduce noise-floor amplification between speech bursts;
+  // higher values produce louder speech at the cost of audible noise.
+  // **Must be called BEFORE Init()** — the cap is baked into APM config
+  // at Init time and cannot be changed on a running chain (we'd have to
+  // re-Init APM, which drops adaptation state). Returns silently if
+  // called post-Init; caller is expected to enforce ordering. Range:
+  // 0 to 100 dB (out-of-range values cause Init() to fail).
+  void SetAgcMaxGainDb(float max_gain_db);
+
   const ChainStats& Stats() const;
 
  private:

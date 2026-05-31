@@ -18,7 +18,8 @@ struct AecChain::Impl {
   Aec3Adapter aec3;
   RnNsAdapter ns;
   Agc2Adapter agc;
-  bool agc_enabled = false;       // post-NS AGC stage; default OFF
+  bool agc_enabled = false;        // post-NS AGC stage; default OFF
+  float agc_max_gain_db = 50.0f;   // WebRTC default; override via SetAgcMaxGainDb
   ChainStats stats;
   int sample_rate_hz = 0;
   int num_mics = 0;
@@ -39,7 +40,7 @@ bool AecChain::Init(int sample_rate_hz, int num_mics,
   if (!impl_->beamformer.Init(sample_rate_hz, num_mics, geometry)) return false;
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
   if (!impl_->ns.Init(sample_rate_hz)) return false;
-  if (!impl_->agc.Init(sample_rate_hz)) return false;
+  if (!impl_->agc.Init(sample_rate_hz, impl_->agc_max_gain_db)) return false;
   impl_->sample_rate_hz = sample_rate_hz;
   impl_->num_mics = num_mics;
   Reset();
@@ -152,6 +153,12 @@ void AecChain::SetNsVadBlendRange(float low, float high) {
 
 void AecChain::SetAgcEnabled(bool enabled) {
   impl_->agc_enabled = enabled;
+}
+
+void AecChain::SetAgcMaxGainDb(float max_gain_db) {
+  // Stored for the next Init(). If called after Init(), takes effect only
+  // on a future Init() — the running APM's config is fixed at construction.
+  impl_->agc_max_gain_db = max_gain_db;
 }
 
 const ChainStats& AecChain::Stats() const { return impl_->stats; }

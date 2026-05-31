@@ -17,8 +17,11 @@ struct Agc2Adapter::Impl {
 Agc2Adapter::Agc2Adapter() : impl_(std::make_unique<Impl>()) {}
 Agc2Adapter::~Agc2Adapter() = default;
 
-bool Agc2Adapter::Init(int sample_rate_hz) {
+bool Agc2Adapter::Init(int sample_rate_hz, float max_gain_db) {
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
+  // Range check matches WebRTC's accepted band (it clamps internally,
+  // but rejecting nonsense values explicitly is friendlier to callers).
+  if (max_gain_db < 0.0f || max_gain_db > 100.0f) return false;
 
   webrtc::AudioProcessingBuilder builder;
   impl_->apm = builder.Create();
@@ -35,14 +38,14 @@ bool Agc2Adapter::Init(int sample_rate_hz) {
   cfg.gain_controller2.enabled                  = true;
   // gain_controller2.enabled alone is NOT enough — the sub-flag
   // adaptive_digital.enabled is what actually wires the digital AGC.
-  // The defaults (max_gain_db=50, initial_gain_db=15, headroom_db=5,
-  // max_gain_change=6 dB/s) target ~-23 dBFS final output, which is
-  // safely inside the 3GPP TS 26.131 hands-free SLR target band once
-  // the standard sensitivity mapping is applied. Leaving them at
-  // upstream defaults for now; a Phase-2 tuning pass against real
-  // cabin recordings can adjust if measurements indicate the target
-  // level needs shifting.
+  // The default max_gain_db=50 targets ~-23 dBFS final output, which
+  // is safely inside the 3GPP TS 26.131 hands-free SLR target band
+  // once the standard sensitivity mapping is applied. Lower values
+  // cap noise-floor amplification between speech bursts (useful when
+  // default AGC over-brightens background noise on quiet output);
+  // higher values produce louder speech at the cost of audible noise.
   cfg.gain_controller2.adaptive_digital.enabled = true;
+  cfg.gain_controller2.adaptive_digital.max_gain_db = max_gain_db;
   cfg.gain_controller2.input_volume_controller.enabled = false;
   impl_->apm->ApplyConfig(cfg);
 
