@@ -1,9 +1,9 @@
 # ADR-0012: Phase-1 acceptance bar — internal numeric targets before 3GPP TS 26.131 cert
 
-**Status:** Accepted (provisional — numbers locked against synthetic + a small set of recorded conditions; will sharpen once Phase 2 cabin recordings exist).
-**Date:** 2026-05-19
+**Status:** Accepted (provisional — v1 numbers were aspirational against literature; **v2 (2026-05-31) recalibrates against measured baseline** from the AEC-Challenge 30-clip subset + NS / AGC sweeps. Phase-2 cabin recordings will drive the next sharpening cycle).
+**Date:** 2026-05-19 (v1); recalibrated 2026-05-31 (v2 — see §2.1).
 **Resolves:** Open assumption A2 from [ADR-0011](0011-aec3-tuning-methodology.md) ("a near-end damage metric will be specified later") **plus** the broader question of "what numeric quality target are we trying to hit before booking 3GPP TS 26.131 lab time."
-**Builds on:** [ADR-0011](0011-aec3-tuning-methodology.md) `ecnr_eval` harness; `reference/score_mos.py` (DNSMOS + AECMOS columns).
+**Builds on:** [ADR-0011](0011-aec3-tuning-methodology.md) `ecnr_eval` harness; `reference/score_mos.py` (DNSMOS + AECMOS columns); `reference/run_aec_challenge.py` (AEC-Challenge corpus runner).
 
 ## Context
 
@@ -50,6 +50,37 @@ The targets are aspirational on a stand-in corpus (synthetic + the 5 real refere
 
 If **any one metric** misses its floor on **any one condition**, Phase 1 is not "ready for lab." Soft targets (medians) are reported in the closeout note but are not block-on-failure.
 
+### 2.1. Measured-baseline-informed numbers (v2, 2026-05-31) — AUTHORITATIVE
+
+The v1 table above was best-guess against DNSMOS literature; with three diagnostic runs and two sweeps now in hand, several numbers were either too lenient (BAK/echo had margin to spare) or unreachable on certain scenarios (SIG/OVRL on far-end-single-talk). The recalibrated bar adds a **per-scenario applicability matrix** (§3.1) and adjusts floors/targets to match what the chain actually does today.
+
+**Data sources** (all on `main` at commit `1a9544f` or later):
+1. [`docs/phase-1-acceptance-grade.md`](../phase-1-acceptance-grade.md) — synthetic-fixture grade (AGC off + AGC on).
+2. [`docs/phase-1-acceptance-grade-aec-challenge.md`](../phase-1-acceptance-grade-aec-challenge.md) — AEC-Challenge 30-clip first-run grade (AGC off + AGC on).
+3. NS-blend corpus sweep ([commit `4b9acb5`](https://github.com/), 9 configs × 30 clips).
+4. AGC max_gain_db corpus sweep ([commit `1a9544f`](https://github.com/), 7 configs × 30 clips).
+
+**Recalibrated floors and targets** (apply only to scenarios where the metric is meaningful — see §3.1):
+
+| Metric | v2 floor | v2 target | Change from v1 | Rationale |
+|---|---:|---:|---|---|
+| `erle_true_median_db` | ≥ 12 dB | ≥ 20 dB | unchanged | AEC-Challenge corpus doesn't include silence-pass echo-only oracles → metric is N/A for the AEC-Challenge gate. Continues to apply for `ecnr_eval --run` against `conditions/` trees with proper oracles. |
+| `dnsmos_sig` | ≥ 3.0 | **≥ 3.3** | floor unchanged; **target lowered 3.5 → 3.3** | NE-only p50 = 3.46 (AGC off) — 3.3 is achievable; 3.5 is unreached in any measured config. DT borderline-passes at 3.0 floor only with AGC on. |
+| `dnsmos_bak` | **≥ 3.0** | **≥ 3.5** | **floor raised 2.5 → 3.0; target raised 3.0 → 3.5** | Measured 3.85-4.05 across every config × scenario. v1 floor of 2.5 was lenient; 3.0 still passes everywhere with margin and tightens the regression-catcher. |
+| `dnsmos_ovrl` | ≥ 2.7 | ≥ 3.0 | unchanged | DT-on-AGC p50 = 2.71 (just clears 2.7); NE p50 = 3.02-3.12 (just clears 3.0 target). v1 numbers happen to be exactly right for the corpus distribution. |
+| `aecmos_echo` | **≥ 4.0** | **≥ 4.3** | **floor raised 3.5 → 4.0; target raised 4.0 → 4.3** | Measured 4.34-4.50 across the corpus. AEC3 is genuinely healthy; raising the floor catches future regressions without false-failing. |
+| `aecmos_dt` | ≥ 3.0 | ≥ 3.5 | unchanged | DT corpus p50 = 3.28 (just under target, above floor). v1 numbers correct. |
+
+**What v2 does not change:**
+- Independent-per-metric scoring (no aggregation).
+- The "floor miss = BLOCK" semantics.
+- The v1 metric panel (six numbers per condition).
+
+**Why these numbers and not others:**
+- **Tightened where we have margin** (BAK, echo) so regressions show up faster.
+- **Lowered SIG target** to a number we actually observe — 3.5 was aspirational against literature, not anchored in our content.
+- **Left everything else** where measurement happens to land within ±0.05 of the v1 number.
+
 ### 3. The condition set Phase 1 grades against
 
 Phase 1 closeout grades against a **synthetic + small recorded** set, not the full 134-case Phase-2 corpus. Justification: Phase 2 isn't started, but we still need a defensible internal bar for v1.
@@ -61,6 +92,32 @@ Phase 1 closeout grades against a **synthetic + small recorded** set, not the fu
 | Real-mic recorded — fixture | `reference/mixed_sound.wav` + matched ref | 1 | the user-supplied "near-end voice + heavy echo" fixture |
 
 That's 4 conditions for Phase 1 grading. **All four must pass the per-metric floor.** Phase 2 expands to 6 (per the recording protocol) and eventually 24 (4-take × 6 condition matrix) and eventually 134 (the full corpus).
+
+The synthetic-fixture condition set above is **superseded** by the AEC-Challenge 30-clip subset for Phase-1 grading going forward:
+
+| Set | Source | Count | Purpose |
+|---|---|---|---|
+| AEC-Challenge real-recordings subset | [`datasets/aec_challenge/MANIFEST.tsv`](../../datasets/aec_challenge/MANIFEST.tsv) — Microsoft AEC-Challenge real-recordings test set | 30 (10 each: DT / ST_NE / ST_FE) | Standardised perceptual-quality corpus going forward; runs via `reference/run_aec_challenge.py` |
+
+The four original synthetic-fixture conditions stay graded under `phase-1-acceptance-grade.md` for historical comparison but are no longer the primary corpus.
+
+### 3.1. Per-scenario applicability matrix (v2, 2026-05-31)
+
+Not every metric is meaningful on every scenario. ST_FE clips have no intended near-end speech, so a low `dnsmos_sig`/`dnsmos_ovrl` score on an ST_FE clip reflects "residual far-end leakage is audible" — useful diagnostic, but NOT a pass/fail signal for "the chain damages near-end voice." Conversely ST_NE has no far-end echo, so `aecmos_echo` / `aecmos_dt` have nothing to score.
+
+Floor enforcement applies only where ✓ in this table:
+
+| Metric | `doubletalk` | `nearend_singletalk` | `farend_singletalk` |
+|---|:-:|:-:|:-:|
+| `erle_true_median_db` | ✓ (when oracle present) | n/a | ✓ (when oracle present) |
+| `dnsmos_sig`  | ✓ | ✓ | — (informational only) |
+| `dnsmos_bak`  | ✓ | ✓ | ✓ |
+| `dnsmos_ovrl` | ✓ | ✓ | — (informational only) |
+| `aecmos_echo` | ✓ | n/a | ✓ |
+| `aecmos_other`| (informational) | (informational) | (informational) |
+| `aecmos_dt`   | ✓ | n/a | n/a |
+
+The CORPUS VERDICT in `run_aec_challenge.py` should respect this matrix (follow-up code change). Until that lands, the gate over-blocks on ST_FE's `dnsmos_sig`/`dnsmos_ovrl`; the v2 grade doc footnotes which BLOCKs are "structural" vs "real."
 
 ### 4. How the bar is applied (workflow)
 
@@ -121,18 +178,39 @@ What the bar **costs**:
 ## Open assumptions
 
 - **A1: DNSMOS P.835 SIG correlates well with the near-end damage we care about.** Microsoft Research validates DNSMOS-SIG against ITU-T P.808 crowdsourced MOS, but their validation set is mostly call-centre conditions; in-cabin road-noise is under-represented. If a Phase-2-grade listening study reveals SIG ≠ in-cabin-perceived-quality, we'd need PESQ or POLQA as an alternate.
+  - **v2 update (2026-05-31)**: PARTLY CLOSED. AEC-Challenge real-recording corpus gives `dnsmos_sig` p50 = 3.46 on ST_NE clips (clean near-end voice), which matches the literature's "good quality preserved" band. DNSMOS-SIG is behaving sensibly. The in-cabin question is still open until Phase-2 recordings — A1's premise is right; its scope narrows to "in-cabin specifically."
 - **A2: AECMOS doubletalk score is a good proxy for the artifact the user is hitting today.** The user's observation is voice-over-suppression on non-stationary noise (cafe babble), which is more an NS problem than an AEC doubletalk problem. `aecmos_dt` may not move much; `dnsmos_sig` is the more direct measurement. We grade both and see.
+  - **v2 update**: CLOSED. AEC-Challenge DT p50 = 3.28 across AGC on/off; both perceptual oracles agree on near-end damage when present. `aecmos_dt` does move (3.28 on real recordings vs ~2.90 on the over-suppressed synthetic fixtures), so it's informative. Keep both metrics in the panel.
 - **A3: 4 conditions are enough for Phase-1 closeout grading.** Statistically thin — but the gate is per-condition, not aggregated, so a 4-of-4 pass is informative even at small N. Phase 2 fixes this.
+  - **v2 update**: SUPERSEDED. The 30-clip AEC-Challenge subset replaces the 4-condition set as the primary corpus (§3). 30 clips × 3 scenarios gives proper per-scenario percentiles (p10/p50/p90) instead of single-point reads.
 - **A4: The targets in §2 are aspirational but achievable.** Without measurement on the current chain we don't know — they're informed by DNSMOS literature thresholds + AECMOS's "typical good chain" reference points. The first run of the gate against the current chain will calibrate this; if everything misses by a lot, the bar is wrong, not the chain.
+  - **v2 update**: PARTLY CLOSED. Recalibrated numbers in §2.1 are anchored on measured baselines, not literature. **Remaining aspirational**: the `dnsmos_sig` floor of 3.0 on DT is not yet cleared without AGC; we hold the floor at 3.0 because AGC-on does clear it (3.02) — but a small DT regression could flip it. Re-check after every chain change.
+- **A5 (new, v2)**: NS-blend tuning cannot move the gate on real-recording content. Two corpus sweeps (synthetic and AEC-Challenge) both show `rnnoise_default` is at or near optimum; Step A/B blends are net-negative or marginal on every applicable metric. Locks in `rnnoise_default` as the production default. The ST_FE residual-leakage floor is structural and motivates Phase 3 RES.
+- **A6 (new, v2)**: AGC default policy: AGC-on flips doubletalk from BLOCK to PASS on `dnsmos_sig`/`dnsmos_ovrl` (3.02/2.71 vs 2.98/2.68). ST_NE marginally hurt but still passes; ST_FE marginally hurt but blocked structurally regardless. **v0.4 should default `--agc` on.** AGC `max_gain_db` tuning has no signal on this corpus (cap never engaged); keep WebRTC default of 50. Re-check on cabin recordings where the cap may matter.
 
 ## Action items
 
-- [ ] **Phase 1, week 1:** implement `reference/check_acceptance_bar.py` per §4. Single Python file, ~50 LOC, no external deps beyond stdlib.
-- [ ] **Phase 1, week 1:** download DNSMOS P.835 ONNX into `models/dnsmos_p835.onnx` (~10 MB). Add `models/` to `.gitignore` if not already there.
-- [ ] **Phase 1, week 1:** run the full gate on the current chain against §3's 4 conditions. Publish results as `docs/phase-1-acceptance-grade.md`. Use the actual numbers to validate / adjust §2.
-- [ ] **Phase 1, week 2:** wire `check_acceptance_bar.py` into CI (or a documented manual step in the release checklist).
-- [ ] **Phase 1.5 (gated on AECMOS wiring):** re-run the gate with the AECMOS columns populated. Adjust `aecmos_echo` / `aecmos_dt` floors if literature numbers diverge from the chain's actual performance.
-- [ ] **Phase 2 (gated on cabin recordings):** re-grade against the 134-case corpus. Open ADR-0013 to supersede this ADR with measurement-grounded numbers.
+**Completed (v1):**
+- [x] **Phase 1, week 1:** implement `reference/check_acceptance_bar.py` per §4. Single Python file, ~50 LOC, no external deps beyond stdlib.
+- [x] **Phase 1, week 1:** download DNSMOS P.835 ONNX into `models/dnsmos_p835.onnx` (~10 MB). Add `models/` to `.gitignore` if not already there.
+- [x] **Phase 1, week 1:** run the full gate on the current chain against §3's 4 conditions. Publish results as `docs/phase-1-acceptance-grade.md`.
+- [x] **Phase 1.5 (AECMOS wiring):** AECMOS scoring landed; all six metrics populated.
+
+**Completed (v2):**
+- [x] **AEC-Challenge integration (2026-05-31):** 30-clip subset + `run_aec_challenge.py` + first-run grade [`phase-1-acceptance-grade-aec-challenge.md`](../phase-1-acceptance-grade-aec-challenge.md).
+- [x] **NS-blend corpus sweep (2026-05-31):** 9 configs × 30 clips via `sweep_ns_blend.py --config-set ns --manifest`.
+- [x] **AGC max_gain_db corpus sweep (2026-05-31):** 7 configs × 30 clips via `sweep_ns_blend.py --config-set agc --manifest`. Plumbed `--agc-max-gain-db` CLI flag through to APM config.
+- [x] **§2.1 + §3.1 recalibration:** measured-baseline-informed floors / targets + per-scenario applicability matrix locked.
+
+**Open (next sprint):**
+- [ ] Update `run_aec_challenge.py` CORPUS VERDICT logic to respect §3.1 applicability matrix (skip `dnsmos_sig`/`dnsmos_ovrl` on ST_FE; skip `aecmos_echo`/`aecmos_dt` on ST_NE).
+- [ ] Update `run_aec_challenge.py` floor/target constants to the v2 §2.1 numbers.
+- [ ] Flip the production default to `--agc on` per A6. Affects `ecnr_bench` default + any callers that build on top.
+- [ ] Wire the gate into CI as a manual-trigger workflow on PRs touching `src/pipeline/`. Skip on PRs that only touch `docs/` / `reference/`.
+
+**Phase 2 (gated on cabin recordings):**
+- [ ] Re-grade against the cabin-recording corpus once it exists. Open ADR-0013 to supersede this ADR with cabin-grounded numbers.
+- [ ] Re-sweep AGC `max_gain_db` on cabin content — current sweep's "cap never engages" result may not hold on quieter cabin SNR conditions.
 
 ## References
 
