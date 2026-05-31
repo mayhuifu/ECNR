@@ -1,0 +1,203 @@
+# AEC-Challenge perceptual-quality gate.
+#
+# Runs the current chain against the 30-clip Microsoft AEC-Challenge subset
+# (per docs/adr/0012-phase-1-acceptance-bar.md) on PRs that touch the chain
+# code or eval tooling. Posts a per-scenario verdict to the job summary.
+#
+# v1 is INFORMATIONAL — does not block merges on regressions. The §3.1
+# applicability matrix needs to be wired into run_aec_challenge.py first
+# (see ADR-0012 "Open" action items) before the gate is enforced.
+#
+# Caches:
+#   * vendor/  — fetched once per scripts/fetch-vendor.sh content hash
+#   * build/  — cmake build output (webrtc-apm Meson build is the slow part)
+#   * models/ — DNSMOS + AECMOS ONNX downloads
+#
+# Wall time:
+#   * cold cache: ~15 min (webrtc-apm Meson + cmake build dominates)
+#   * warm cache: ~3 min (incremental cmake + the actual chain runs)
+
+name: aec-challenge-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'reference/**'
+      - 'datasets/aec_challenge/MANIFEST.tsv'
+      - '.github/workflows/aec-challenge-gate.yml'
+      - 'CMakeLists.txt'
+      - 'vendor/MANIFEST.tsv'
+      - 'scripts/fetch-vendor.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'reference/**'
+      - 'datasets/aec_challenge/MANIFEST.tsv'
+      - '.github/workflows/aec-challenge-gate.yml'
+      - 'CMakeLists.txt'
+      - 'vendor/MANIFEST.tsv'
+      - 'scripts/fetch-vendor.sh'
+
+jobs:
+  gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install OS build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson pkg-config \
+            libspeexdsp-dev python3-pip
+          python3 --version
+          cmake --version
+          meson --version
+
+      - name: Cache vendor/ (rnnoise + speexdsp pinned sources)
+        id: cache-vendor
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-${{ hashFiles('scripts/fetch-vendor.sh', 'vendor/MANIFEST.tsv') }}
+
+      - name: Fetch vendored dependencies
+        if: steps.cache-vendor.outputs.cache-hit != 'true'
+        run: scripts/fetch-vendor.sh required
+
+      - name: Cache build/ (cmake + webrtc-apm Meson output)
+        uses: actions/cache@v4
+        with:
+          path: build
+          # Invalidate when the chain code or build wiring changes; not on
+          # eval-only changes (those don't recompile C++).
+          key: build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**/*.cc', 'src/**/*.h', 'vendor/MANIFEST.tsv') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+
+      - name: Configure + build ecnr_bench
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DECNR_BUILD_LIVE=OFF \
+            -DECNR_BUILD_EVAL=OFF
+          cmake --build build --target ecnr_bench -j$(nproc)
+          ./build/ecnr_bench --help 2>&1 | head -3 || true
+
+      - name: Install Python eval deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install numpy scipy onnxruntime librosa
+
+      - name: Cache models/ (DNSMOS + AECMOS ONNX)
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          # Keyed on filename only — model files are versioned upstream by
+          # their Microsoft repo SHA; pinning here would require a manual
+          # bump on every refresh. URLs below treat 'main' as the moving
+          # head, accepting the small drift risk.
+          key: models-dnsmos-aecmos-v1
+
+      - name: Download DNSMOS + AECMOS ONNX from upstream LFS
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          curl -fsSL \
+            "https://media.githubusercontent.com/media/microsoft/DNS-Challenge/master/DNSMOS/sig_bak_ovr.onnx" \
+            -o models/dnsmos_p835.onnx
+          curl -fsSL \
+            "https://media.githubusercontent.com/media/microsoft/AEC-Challenge/main/AECMOS/AECMOS_local/Run_1663915512_Stage_0.onnx" \
+            -o models/aecmos.onnx
+          ls -la models/
+
+      - name: Fetch AEC-Challenge 30-clip subset
+        run: |
+          python3 reference/fetch_aec_challenge.py
+          wc -l datasets/aec_challenge/MANIFEST.tsv
+          ls datasets/aec_challenge/ | wc -l
+
+      - name: Run the gate (AGC off — current production default)
+        id: gate-agcoff
+        run: |
+          mkdir -p /tmp/gate_agcoff
+          set +e
+          python3 reference/run_aec_challenge.py \
+            --bench ./build/ecnr_bench \
+            --dnsmos-model models/dnsmos_p835.onnx \
+            --aecmos-model models/aecmos.onnx \
+            --out-dir /tmp/gate_agcoff \
+            --no-keep-enh-wavs \
+            > /tmp/gate_agcoff/run.log 2>&1
+          rc=$?
+          set -e
+          tail -60 /tmp/gate_agcoff/run.log | grep -v "onnxruntime" || true
+          # v1 is informational — record the exit code, do not fail the job.
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Run the gate (AGC on — proposed v0.4 default)
+        id: gate-agcon
+        run: |
+          mkdir -p /tmp/gate_agcon
+          set +e
+          python3 reference/run_aec_challenge.py \
+            --bench ./build/ecnr_bench \
+            --dnsmos-model models/dnsmos_p835.onnx \
+            --aecmos-model models/aecmos.onnx \
+            --agc \
+            --out-dir /tmp/gate_agcon \
+            --no-keep-enh-wavs \
+            > /tmp/gate_agcon/run.log 2>&1
+          rc=$?
+          set -e
+          tail -60 /tmp/gate_agcon/run.log | grep -v "onnxruntime" || true
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Post job summary
+        if: always()
+        run: |
+          {
+            echo "## AEC-Challenge gate result (informational)"
+            echo
+            echo "**Per ADR-0012 v2.** Numbers below are per-scenario p50 against the 30-clip subset."
+            echo
+            echo "### AGC OFF (current production default)"
+            echo '```'
+            tail -50 /tmp/gate_agcoff/run.log 2>/dev/null \
+              | grep -v "onnxruntime" \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | tail -40 || echo "(no log)"
+            echo '```'
+            echo
+            echo "### AGC ON (proposed v0.4 default — ADR-0012 A6)"
+            echo '```'
+            tail -50 /tmp/gate_agcon/run.log 2>/dev/null \
+              | grep -v "onnxruntime" \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | tail -40 || echo "(no log)"
+            echo '```'
+            echo
+            echo "### Per-clip CSVs"
+            echo "Available as build artifacts (see Artifacts section below)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-results-${{ github.run_id }}
+          path: |
+            /tmp/gate_agcoff/per_clip.csv
+            /tmp/gate_agcoff/summary.csv
+            /tmp/gate_agcoff/run.log
+            /tmp/gate_agcon/per_clip.csv
+            /tmp/gate_agcon/summary.csv
+            /tmp/gate_agcon/run.log
+          retention-days: 30
