@@ -38,11 +38,14 @@ struct Args {
   // active and feeding bit-identical channels triggers a one-shot
   // stderr warning from Beamformer.
   bool bypass_beamformer = false;
-  // Enable the post-NS AGC stage (WebRTC AGC2) per ADR-0001. Default OFF
-  // to preserve historical bench behaviour for regression comparison;
-  // pass --agc to normalise output to ~−19 dBFS RMS for 3GPP TS 26.131
-  // hands-free SLR compliance.
-  bool agc_enabled = false;
+  // Enable the post-NS AGC stage (WebRTC AGC2) per ADR-0001. **Default ON**
+  // as of v0.4.1 per ADR-0012 §"Open assumptions" A6 — measured against the
+  // AEC-Challenge corpus, AGC on flips doubletalk from BLOCK to PASS on the
+  // dnsmos_sig / dnsmos_ovrl floors with only marginal ST_* costs. Pass
+  // --no-agc to opt out (useful for A/B regression comparisons against the
+  // pre-v0.4.1 baseline). --agc explicitly re-enables (no-op against the
+  // default; useful for scripts that want to be explicit either way).
+  bool agc_enabled = true;
   // Override AGC2's adaptive-digital max_gain_db cap. WebRTC default 50.
   // Only meaningful when --agc is also set. Used by tuning sweeps to
   // pick an operating point that balances loudness against noise-floor
@@ -64,9 +67,13 @@ void PrintUsage(const char* prog) {
                "  --bypass-beamformer  use Beamformer passthrough (ch[0] verbatim)\n"
                "                       instead of DSB. Right for mono input duplicated\n"
                "                       across channels (no spatial information).\n"
-               "  --agc                enable post-NS AGC2 stage (ADR-0001). Normalises\n"
-               "                       output to ~-19 dBFS RMS for VoLTE/VoNR uplink-\n"
-               "                       loudness compliance (3GPP TS 26.131 SLR target).\n"
+               "  --agc                enable post-NS AGC2 stage (ADR-0001). Default ON\n"
+               "                       as of v0.4.1. Normalises output to ~-19 dBFS\n"
+               "                       RMS for VoLTE/VoNR uplink-loudness compliance\n"
+               "                       (3GPP TS 26.131 SLR target).\n"
+               "  --no-agc             disable the post-NS AGC2 stage (opt out of the\n"
+               "                       v0.4.1 default). Useful for regression A/B vs\n"
+               "                       the pre-v0.4.1 baseline.\n"
                "  --agc-max-gain-db N  override AGC2 adaptive-digital max_gain_db cap\n"
                "                       (WebRTC default = 50). Range 0..100. Only\n"
                "                       meaningful with --agc.\n",
@@ -107,6 +114,8 @@ bool ParseArgs(int argc, char** argv, Args* a) {
       a->bypass_beamformer = true;
     } else if (flag == "--agc") {
       a->agc_enabled = true;
+    } else if (flag == "--no-agc") {
+      a->agc_enabled = false;
     } else if (flag == "--agc-max-gain-db" && i + 1 < argc) {
       try {
         a->agc_max_gain_db = std::stof(argv[++i]);

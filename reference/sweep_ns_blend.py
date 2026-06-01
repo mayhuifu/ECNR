@@ -60,23 +60,29 @@ except ImportError as e:
 
 # NS-blend sweep — no-mitigation baseline, Step A (uniform blend),
 # Step B (VAD-gated blend across the full ladder), NS-off ceiling.
+#
+# All NS configs pass --no-agc so the sweep isolates NS behaviour from
+# AGC. (bench's default flipped to AGC-on in v0.4.1; without --no-agc
+# the implicit baseline would be AGC-on and NS effects would be muddied.)
 NS_CONFIGS = [
-    ("rnnoise_default", []),
-    ("step_a_blend_15", ["--ns-dry-blend", "0.15"]),
-    ("step_a_blend_25", ["--ns-dry-blend", "0.25"]),
-    ("step_b_vad_0p30", ["--ns-vad-blend", "0.0,0.30"]),
-    ("step_b_vad_0p50", ["--ns-vad-blend", "0.0,0.50"]),
-    ("step_b_vad_0p70", ["--ns-vad-blend", "0.0,0.70"]),
-    ("step_b_vad_0p85", ["--ns-vad-blend", "0.0,0.85"]),
-    ("step_b_vad_1p00", ["--ns-vad-blend", "0.0,1.00"]),
-    ("ns_off_ceiling",  ["--ns-dry-blend", "1.0"]),
+    ("rnnoise_default", ["--no-agc"]),
+    ("step_a_blend_15", ["--no-agc", "--ns-dry-blend", "0.15"]),
+    ("step_a_blend_25", ["--no-agc", "--ns-dry-blend", "0.25"]),
+    ("step_b_vad_0p30", ["--no-agc", "--ns-vad-blend", "0.0,0.30"]),
+    ("step_b_vad_0p50", ["--no-agc", "--ns-vad-blend", "0.0,0.50"]),
+    ("step_b_vad_0p70", ["--no-agc", "--ns-vad-blend", "0.0,0.70"]),
+    ("step_b_vad_0p85", ["--no-agc", "--ns-vad-blend", "0.0,0.85"]),
+    ("step_b_vad_1p00", ["--no-agc", "--ns-vad-blend", "0.0,1.00"]),
+    ("ns_off_ceiling",  ["--no-agc", "--ns-dry-blend", "1.0"]),
 ]
 
 # AGC max_gain_db sweep — AGC off baseline + AGC on at five gain caps.
 # Default WebRTC value is 50; we span 20-80 to find the operating point
 # that maximises dnsmos_sig without over-brightening background noise.
+# agc_off must be explicit (--no-agc) since bench defaults to AGC on
+# as of v0.4.1.
 AGC_CONFIGS = [
-    ("agc_off",             []),
+    ("agc_off",             ["--no-agc"]),
     ("agc_on_max_20",       ["--agc", "--agc-max-gain-db", "20"]),
     ("agc_on_max_30",       ["--agc", "--agc-max-gain-db", "30"]),
     ("agc_on_max_40",       ["--agc", "--agc-max-gain-db", "40"]),

@@ -120,11 +120,13 @@ def verify_cache(rows: list[dict], root: Path) -> None:
 def run_bench(bench: Path, mic: Path, ref: Path, out_wav: Path,
               agc: bool, extra_flags: str) -> dict:
     """Invoke ecnr_bench. Returns {erle_reported_db, cpu_ms_per_frame, rtf, status,
-       stderr (on fail)}. Parses bench's last-line summary; tolerates extra columns."""
+       stderr (on fail)}. Parses bench's last-line summary; tolerates extra columns.
+
+    agc: True → pass --agc to bench (no-op against v0.4.1+ default which is on).
+         False → pass --no-agc to bench (opt out of the v0.4.1 default)."""
     cmd = [str(bench), "--mic", str(mic), "--ref", str(ref), "--out", str(out_wav),
            "--bypass-beamformer"]
-    if agc:
-        cmd.append("--agc")
+    cmd.append("--agc" if agc else "--no-agc")
     if extra_flags:
         cmd.extend(shlex.split(extra_flags))
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -342,7 +344,13 @@ def main() -> int:
     ap.add_argument("--dnsmos-model", required=True, type=Path)
     ap.add_argument("--aecmos-model", required=True, type=Path)
     ap.add_argument("--out-dir", required=True, type=Path)
-    ap.add_argument("--agc", action="store_true", help="pass --agc to ecnr_bench")
+    # AGC default-on as of v0.4.1 per ADR-0012 A6. Mirrors ecnr_bench's
+    # flag surface: --agc explicitly enables (no-op against the default);
+    # --no-agc opts out (passes --no-agc to bench).
+    ap.add_argument("--agc",    dest="agc", action="store_true",  default=True,
+                    help="enable post-NS AGC2 (default on as of v0.4.1)")
+    ap.add_argument("--no-agc", dest="agc", action="store_false",
+                    help="opt out of AGC2 (pre-v0.4.1 baseline)")
     ap.add_argument("--bench-flags", default="",
                     help="extra flags to pass through to ecnr_bench")
     ap.add_argument("--keep-enh-wavs", action="store_true", default=True)
