@@ -30,16 +30,20 @@ import sys
 from pathlib import Path
 
 
-# ADR-0012 §2: per-metric targets. (metric, target, floor, "higher_is_better").
-# Phase 1 cut; supersede via ADR-0013 once Phase 2 data exists.
+# ADR-0012 §2.1 v2 (2026-05-31) — measured-baseline-informed targets.
+# Authoritative source: docs/adr/0012-phase-1-acceptance-bar.md §2.1.
+# Phase 1 cut; supersede via ADR-0013 once Phase 2 cabin data exists.
+# Note: this gate is per-condition (one row = one fixture); it does NOT
+# implement the per-scenario applicability matrix from ADR-0012 §3.1 —
+# that lives in run_aec_challenge.py where scenario context is available.
 BAR = [
     # column,                target,  floor,  units
     ("erle_true_median_db",  20.0,    12.0,   "dB"),
-    ("dnsmos_sig",           3.5,     3.0,    "MOS"),
-    ("dnsmos_bak",           3.0,     2.5,    "MOS"),
-    ("dnsmos_ovrl",          3.0,     2.7,    "MOS"),
-    ("aecmos_echo",          4.0,     3.5,    "MOS"),
-    ("aecmos_dt",            3.5,     3.0,    "MOS"),
+    ("dnsmos_sig",            3.3,     3.0,    "MOS"),  # v2: target 3.5 → 3.3
+    ("dnsmos_bak",            3.5,     3.0,    "MOS"),  # v2: floor 2.5 → 3.0; target 3.0 → 3.5
+    ("dnsmos_ovrl",           3.0,     2.7,    "MOS"),
+    ("aecmos_echo",           4.3,     4.0,    "MOS"),  # v2: floor 3.5 → 4.0; target 4.0 → 4.3
+    ("aecmos_dt",             3.5,     3.0,    "MOS"),
 ]
 
 

@@ -99,11 +99,12 @@ SCENARIO_MAP = {
                            "aecmos_cols": ("aecmos_echo",)},
 }
 
-# ADR-0012 §2 floors + soft targets.
-FLOORS = {"dnsmos_sig": 3.0, "dnsmos_bak": 2.5, "dnsmos_ovrl": 2.7,
-          "aecmos_echo": 3.5, "aecmos_dt": 3.0}
-TARGETS = {"dnsmos_sig": 3.5, "dnsmos_bak": 3.0, "dnsmos_ovrl": 3.0,
-           "aecmos_echo": 4.0, "aecmos_dt": 3.5}
+# ADR-0012 §2.1 v2 floors + soft targets. Mirror updates here when the
+# ADR changes; the authoritative source is docs/adr/0012-phase-1-acceptance-bar.md.
+FLOORS  = {"dnsmos_sig": 3.0, "dnsmos_bak": 3.0, "dnsmos_ovrl": 2.7,
+           "aecmos_echo": 4.0, "aecmos_dt": 3.0}
+TARGETS = {"dnsmos_sig": 3.3, "dnsmos_bak": 3.5, "dnsmos_ovrl": 3.0,
+           "aecmos_echo": 4.3, "aecmos_dt": 3.5}
 
 
 def colour(v: float, floor: float, target: float) -> str:

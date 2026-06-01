@@ -31,21 +31,40 @@ except ImportError as e:
     sys.exit(2)
 
 # ---- Scenario → AECMOS talk_type + meaningful columns ----------------
+# `aecmos_cols`         — AECMOS columns to populate (non-NaN) for this scenario
+# `enforced_metrics`    — per ADR-0012 §3.1 applicability matrix: which metrics
+#                         contribute to floor enforcement / CORPUS VERDICT.
+#                         ST_FE excludes dnsmos_sig/ovrl (no near-end content);
+#                         ST_NE excludes aecmos_echo/dt (no far-end content).
 SCENARIO_MAP = {
-    "doubletalk":          {"talk_type": "dt",
-                            "aecmos_cols": ("aecmos_echo", "aecmos_other", "aecmos_dt")},
-    "nearend_singletalk":  {"talk_type": "st_ne",
-                            "aecmos_cols": ("aecmos_other",)},
-    "farend_singletalk":   {"talk_type": "st_fe",
-                            "aecmos_cols": ("aecmos_echo",)},
+    "doubletalk": {
+        "talk_type":         "dt",
+        "aecmos_cols":       ("aecmos_echo", "aecmos_other", "aecmos_dt"),
+        "enforced_metrics":  ("dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
+                              "aecmos_echo", "aecmos_dt"),
+    },
+    "nearend_singletalk": {
+        "talk_type":         "st_ne",
+        "aecmos_cols":       ("aecmos_other",),
+        "enforced_metrics":  ("dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl"),
+    },
+    "farend_singletalk": {
+        "talk_type":         "st_fe",
+        "aecmos_cols":       ("aecmos_echo",),
+        # ST_FE excludes dnsmos_sig / dnsmos_ovrl per ADR-0012 §3.1 — those
+        # clips have no intended near-end speech, so SIG/OVRL measure
+        # residual-leakage perception (informational) rather than chain damage.
+        "enforced_metrics":  ("dnsmos_bak", "aecmos_echo"),
+    },
 }
 
-# ADR-0012 §2 floors + soft targets — sourced from
-# reference/check_acceptance_bar.py to stay in sync.
-FLOORS = {"dnsmos_sig": 3.0, "dnsmos_bak": 2.5, "dnsmos_ovrl": 2.7,
-          "aecmos_echo": 3.5, "aecmos_dt": 3.0}
-TARGETS = {"dnsmos_sig": 3.5, "dnsmos_bak": 3.0, "dnsmos_ovrl": 3.0,
-           "aecmos_echo": 4.0, "aecmos_dt": 3.5}
+# ADR-0012 §2.1 v2 (2026-05-31) — measured-baseline-informed floors + targets.
+# Authoritative source: docs/adr/0012-phase-1-acceptance-bar.md §2.1.
+# Mirror any change to reference/check_acceptance_bar.py.
+FLOORS  = {"dnsmos_sig": 3.0, "dnsmos_bak": 3.0, "dnsmos_ovrl": 2.7,
+           "aecmos_echo": 4.0, "aecmos_dt": 3.0}
+TARGETS = {"dnsmos_sig": 3.3, "dnsmos_bak": 3.5, "dnsmos_ovrl": 3.0,
+           "aecmos_echo": 4.3, "aecmos_dt": 3.5}
 
 PER_CLIP_COLS = ["clip_id", "scenario",
                  "dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
@@ -258,9 +277,18 @@ def _colour(v: float, floor: float | None, target: float | None) -> str:
 
 
 def print_summary(per_clip: list[dict], summary: list[dict]) -> bool:
-    """Print per-scenario tables + CORPUS VERDICT. Returns True if PASS."""
+    """Print per-scenario tables + CORPUS VERDICT. Returns True if PASS.
+
+    Per ADR-0012 §3.1, the CORPUS VERDICT only enforces floors on metrics
+    listed in SCENARIO_MAP[scn]['enforced_metrics']. Metrics that are
+    populated but not enforced (e.g. ST_FE's dnsmos_sig — no near-end
+    content) are labelled "(info, not enforced)" and printed with their
+    floor/target inline for diagnostic visibility, but do not flip
+    CORPUS VERDICT to BLOCK.
+    """
     corpus_pass = True
     for scn in sorted({s["scenario"] for s in summary}):
+        enforced = set(SCENARIO_MAP[scn]["enforced_metrics"])
         scn_rows = [r for r in per_clip if r["scenario"] == scn]
         n_total = len(scn_rows)
         n_ok = sum(1 for r in scn_rows if r["status"] == "ok")
@@ -271,19 +299,29 @@ def print_summary(per_clip: list[dict], summary: list[dict]) -> bool:
         for s in [s for s in summary if s["scenario"] == scn]:
             m = s["metric"]
             floor, target = FLOORS.get(m), TARGETS.get(m)
+            is_enforced = (m in enforced)
             floor_s  = f"{floor:>6.2f}"  if floor  is not None else "    - "
             target_s = f"{target:>7.2f}" if target is not None else "    -  "
             if floor is None:
                 verdict = "(informational)"
+            elif not is_enforced:
+                verdict = ("PASS (info)" if s["p50"] >= floor
+                           else f"{s['n_below_floor']}/{s['n_clips']} below floor (info)")
             elif s["p50"] >= floor:
                 verdict = "PASS"
             else:
                 verdict = f"{s['n_below_floor']}/{s['n_clips']} below floor"
-            print(f"  {m:<14} {_colour(s['p10'], floor, target)} "
-                  f"{_colour(s['p50'], floor, target)} "
-                  f"{_colour(s['p90'], floor, target)}  "
+            # Suppress colour for non-enforced rows so the eye tracks the
+            # actual gate-blocking failures rather than the structural ones.
+            if is_enforced and floor is not None:
+                colour_args = (floor, target)
+            else:
+                colour_args = (None, None)
+            print(f"  {m:<14} {_colour(s['p10'], *colour_args)} "
+                  f"{_colour(s['p50'], *colour_args)} "
+                  f"{_colour(s['p90'], *colour_args)}  "
                   f"{floor_s} {target_s}  {verdict}")
-            if floor is not None and s["p50"] < floor:
+            if is_enforced and floor is not None and s["p50"] < floor:
                 corpus_pass = False
         if n_failed >= 3:
             print(f"  \033[31mWARNING: {n_failed} clips failed in {scn}\033[0m")
