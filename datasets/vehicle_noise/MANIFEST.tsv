@@ -1,0 +1,7 @@
+filename	sha256	source
+.cache/TCAR_16k.zip	6b48e45f273ea8d401b5ec97d22c864169684b0ad231bef4a1758922aa5daedc	https://zenodo.org/records/1227121/files/TCAR_16k.zip
+tcar_ch01_16k.wav	ffe4cac12ed78705a52fce5d14f17a4ee838c6f5922446fc66258841323d4a59	https://zenodo.org/records/1227121/files/TCAR_16k.zip
+p501/i01_f1.wav	8e7b196e79c67224579ba766eed0b63bf26ea0452078d53e4193583aa2258fcc	https://raw.githubusercontent.com/microsoft/P.808/master/p835_reference_conditions/3gpp_p501_FB/i01_f1.wav
+p501/i01_m1.wav	7741458d43311a33a722b63dabb552d731c5bd71cb96c1f88c6ba6b994669d91	https://raw.githubusercontent.com/microsoft/P.808/master/p835_reference_conditions/3gpp_p501_FB/i01_m1.wav
+p501/i02_f2.wav	75783e1b55afff5b7678ce960f2e1e33ccdd300813df755aab21c4d93bfb708c	https://raw.githubusercontent.com/microsoft/P.808/master/p835_reference_conditions/3gpp_p501_FB/i02_f2.wav
+p501/i02_m2.wav	b73ca51acc42215b8ee19d19e59fdcce45739b20975f4dc6cd725fcf7e77482a	https://raw.githubusercontent.com/microsoft/P.808/master/p835_reference_conditions/3gpp_p501_FB/i02_m2.wav

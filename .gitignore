@@ -42,6 +42,10 @@ reference/synth/
 !reference/**/*.md
 # AEC-Challenge subset: WAVs gitignored (caught by *.wav), MANIFEST.tsv tracked
 !datasets/**/MANIFEST.tsv
+# vehicle_noise corpus: 130 MB TCAR zip cache never belongs in git;
+# the fetched ITU license text IS tracked for provenance.
+datasets/vehicle_noise/.cache/
+!datasets/vehicle_noise/p501/itu_license_text_from_P501.txt
 !reference/noise/MANIFEST.tsv
 
 # Models — large binaries; commit pointers, not weights
