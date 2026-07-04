@@ -56,6 +56,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build meson pkg-config \
             libsndfile1-dev libspeexdsp-dev libabsl-dev python3-pip
+          # jammy's apt meson is 0.61; vendor/webrtc-audio-processing
+          # requires >= 0.63. pip meson lands in /usr/local/bin which
+          # precedes /usr/bin on the runner PATH.
+          sudo python3 -m pip install --quiet 'meson==1.4.1'
           python3 --version
           cmake --version
           meson --version
