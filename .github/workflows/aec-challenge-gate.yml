@@ -147,16 +147,23 @@ jobs:
           # head, accepting the small drift risk.
           key: models-dnsmos-aecmos-v1
 
-      - name: Download DNSMOS + AECMOS ONNX from upstream LFS
+      - name: Download DNSMOS + AECMOS ONNX from upstream
         if: steps.cache-models.outputs.cache-hit != 'true'
+        # The models are plain git blobs upstream (the old LFS media URLs
+        # went 404, 2026-07-04). Content is SHA-pinned: both files verified
+        # byte-identical to the 2026-05 copies this project calibrated
+        # ADR-0012 against — fail loudly on upstream drift instead of
+        # silently re-baselining the gate.
         run: |
           mkdir -p models
           curl -fsSL \
-            "https://media.githubusercontent.com/media/microsoft/DNS-Challenge/master/DNSMOS/sig_bak_ovr.onnx" \
+            "https://raw.githubusercontent.com/microsoft/DNS-Challenge/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx" \
             -o models/dnsmos_p835.onnx
           curl -fsSL \
-            "https://media.githubusercontent.com/media/microsoft/AEC-Challenge/main/AECMOS/AECMOS_local/Run_1663915512_Stage_0.onnx" \
+            "https://raw.githubusercontent.com/microsoft/AEC-Challenge/main/AECMOS/AECMOS_local/Run_1663915512_Stage_0.onnx" \
             -o models/aecmos.onnx
+          echo "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd  models/dnsmos_p835.onnx" | sha256sum -c -
+          echo "f53122f43cb7e5b77ec797e85c8b997cfc2aac8220857c709226d876de8c0a99  models/aecmos.onnx" | sha256sum -c -
           ls -la models/
 
       - name: Fetch AEC-Challenge 30-clip subset
