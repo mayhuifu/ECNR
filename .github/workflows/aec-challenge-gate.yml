@@ -28,6 +28,7 @@ on:
       - 'datasets/aec_challenge/MANIFEST.tsv'
       - '.github/workflows/aec-challenge-gate.yml'
       - 'CMakeLists.txt'
+      - 'cmake/**'
       - 'vendor/MANIFEST.tsv'
       - 'scripts/fetch-vendor.sh'
   pull_request:
@@ -38,6 +39,7 @@ on:
       - 'datasets/aec_challenge/MANIFEST.tsv'
       - '.github/workflows/aec-challenge-gate.yml'
       - 'CMakeLists.txt'
+      - 'cmake/**'
       - 'vendor/MANIFEST.tsv'
       - 'scripts/fetch-vendor.sh'
 
@@ -113,11 +115,12 @@ jobs:
           path: build
           # Invalidate when the chain code or build wiring changes; not on
           # eval-only changes (those don't recompile C++).
-          # v2 suffix: bust caches from the pre-absl-fix era whose
-          # webrtc-apm-install was built against the bundled subproject absl.
-          key: build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**/*.cc', 'src/**/*.h', 'vendor/MANIFEST.tsv') }}
+          # v3: bust the v2 cache whose ExternalProject stamps were saved
+          # with the Debian-multiarch libdir layout. cmake/ glue is now in
+          # the hash so ExternalProject config changes invalidate properly.
+          key: build-v3-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'src/**/*.cc', 'src/**/*.h', 'vendor/MANIFEST.tsv') }}
           restore-keys: |
-            build-v2-${{ runner.os }}-
+            build-v3-${{ runner.os }}-
 
       - name: Configure + build ecnr_bench
         run: |

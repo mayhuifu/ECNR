@@ -77,6 +77,10 @@ function(_configure_webrtc_apm)
     BINARY_DIR "${WEBRTC_APM_BUILD_DIR}"
     CONFIGURE_COMMAND meson setup
       --prefix=${WEBRTC_APM_INSTALL_DIR}
+      # Pin the libdir: meson defaults to lib/<multiarch> on Debian-family
+      # hosts (lib/x86_64-linux-gnu), which breaks the hardcoded
+      # WEBRTC_APM_LIB_PATH below. lib/ everywhere, all platforms.
+      --libdir=lib
       --buildtype=release
       --default-library=static
       ${_WEBRTC_APM_NEON_FLAG}
