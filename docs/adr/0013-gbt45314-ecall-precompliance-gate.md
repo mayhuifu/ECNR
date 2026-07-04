@@ -76,3 +76,19 @@ The following remain outside this software gate and must be measured on the vehi
 - The existing `v0.3` customer-passed baseline remains preserved as the pre-gate state.
 - A future release must pass this gate before being described as China eCall-ready.
 - If the current chain fails strict initial convergence, that is a real tuning blocker, not a test looseness issue.
+
+## Addendum 2026-07-04 — standard verification + real-recording stimuli
+
+Research pass (verified against the openstd.samr.gov.cn registry and secondary CN sources; full memo in the 2026-07-04 session log):
+
+- **GB/T 45314-2025** published + implemented 2025-02-28 (推荐性), ICS 43.040.10, scope M1/N1 hands-free NB+WB terminals, emergency-call terminals, and voice-interaction terminals. Clause 5 = emergency-call speech quality; **normative Annex A** defines the noise scenes (A.1 hands-free/voice-interaction, A.2 emergency call) drawn from a CATARC-built Chinese noise database (70+ vehicles, 16 scenes each; idle / 60 / 90 / 120 km/h + HVAC states) that is **not publicly downloadable**. Reproduction methodology follows ETSI TS 103 224 practice (50 Hz–20 kHz sound-field playback per CATARC's lab).
+- Normative references include **ITU-T P.501-2020** (test signals), P.79, P.863/P.863.1 (POLQA), ETSI **EG 202 396-3**, **TS 103 558**, **TS 103 802**. Notably absent: ETSI's own noise databases and ITU-T P.1100-series — the noise material is Chinese-recorded, only the scoring family is international.
+- **GB 45672-2025**《车载事故紧急呼叫系统》(mandatory AECS, implementation from 2027-07-01, phased) requires hands-free speech quality per GB/T 45314 — this gate's reason to exist.
+
+**Stimulus upgrade shipped with this addendum** (`reference/fetch_vehicle_noise.py`, SHA-pinned `datasets/vehicle_noise/MANIFEST.tsv`):
+
+- Far/near-end speech: **ITU-T P.501-lineage fullband talkers** (microsoft/P.808 mirror, ITU conformance-testing license) — the same Recommendation the standard cites — pause-compressed into CSS-style continuous excitation (the convergence and double-talk clauses assume continuous signals).
+- B1 road noise: **DEMAND TCAR** real in-car driving noise (CC BY 4.0), deterministic segment; documented as an *approximation* of Annex A cruise scenes since CATARC's database is closed. B2 HVAC remains labelled-synthetic (no open equivalent).
+- The relative level plan is unchanged from the original fixtures; real mode applies one global crest-factor headroom offset (recorded in each `meta.txt`). `--synthetic` reproduces the legacy fixtures bit-exactly.
+
+**Verdict stability**: the real-recording gate reproduces the synthetic verdict shape on the v0.4.1+ chain — far-end TCL/convergence/time-varying PASS, **B2 FAIL at default / PASS with the `--ns-dry-blend 0.20` preset, double-talk FAIL in both modes** (real mode: −33.3 dB near-end delta at default, −19.4 dB with the preset; correlation ≈ 0.1 either way). Two independent stimulus families now point at the same AEC3 nonlinear-suppression gap → Phase-3 neural RES remains the resolution path.

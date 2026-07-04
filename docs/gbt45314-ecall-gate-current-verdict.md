@@ -20,6 +20,17 @@ Reading:
 
 The 2026-05-27 analysis below remains the authoritative diagnosis; nothing in v0.4.x moved it.
 
+### Real-recording stimuli update (same day, later)
+
+The conditions were upgraded to real recordings (P.501-lineage continuous speech + DEMAND TCAR road noise; ADR-0013 addendum). Same chain, real stimuli, −5.3 dB global crest-factor headroom offset:
+
+| Config (real mode) | B2 noise range (<10 dB) | DT near-end delta (≥−12 dB) / corr (≥0.60) | Far-end conditions | Overall |
+|---|---:|---:|---|---|
+| production default (AGC on) | 34.5 dB **FAIL** | −33.3 dB / 0.08 **FAIL** | 3× PASS | BLOCK |
+| + `--ns-dry-blend 0.20` | **PASS** | −19.4 dB / 0.11 **FAIL** | 3× PASS (headroom WARN) | BLOCK |
+
+The verdict shape is identical to the synthetic fixtures — B2 solvable by the preset, double-talk the sole hard blocker — which retroactively validates the synthetic proxies and hardens the Phase-3 RES case: two independent stimulus families, one diagnosis.
+
 ---
 
 ## Original verdict 2026-05-27
