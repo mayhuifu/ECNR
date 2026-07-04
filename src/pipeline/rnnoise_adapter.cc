@@ -11,6 +11,8 @@ namespace ecnr {
 
 namespace {
 constexpr int kRnnoiseFrameSamples = 480;  // 48 kHz / 100 Hz
+// Quality 5 measured equal-cost to 3 on the capture path (RNNoise inference
+// dominates cpu_ns; the resamplers are noise) — keep the higher quality.
 constexpr int kSpeexQuality = 5;
 }  // namespace
 

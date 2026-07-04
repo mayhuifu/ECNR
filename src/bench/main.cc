@@ -51,6 +51,10 @@ struct Args {
   // pick an operating point that balances loudness against noise-floor
   // amplification between speech bursts. <0 = use chain default (50).
   float agc_max_gain_db = -1.0f;
+  // Override AEC3 refined+coarse filter length in 4 ms blocks (WebRTC
+  // default 13 = 52 ms tail). A55 CPU lever under evaluation (spec
+  // 2026-07-04 M7); 0 = WebRTC default.
+  int aec_filter_blocks = 0;
 };
 
 void PrintUsage(const char* prog) {
@@ -76,7 +80,11 @@ void PrintUsage(const char* prog) {
                "                       the pre-v0.4.1 baseline.\n"
                "  --agc-max-gain-db N  override AGC2 adaptive-digital max_gain_db cap\n"
                "                       (WebRTC default = 50). Range 0..100. Only\n"
-               "                       meaningful with --agc.\n",
+               "                       meaningful with --agc.\n"
+               "  --aec-filter-blocks N  override AEC3 refined+coarse filter length in\n"
+               "                       4 ms blocks (WebRTC default 13 = 52 ms tail).\n"
+               "                       Range 9..20. ADR-0011 tuning knob for cabin\n"
+               "                       RT60 fitting; no host CPU effect measured.\n",
                prog);
 }
 
@@ -128,6 +136,20 @@ bool ParseArgs(int argc, char** argv, Args* a) {
         std::fprintf(stderr,
                      "--agc-max-gain-db must be in [0, 100]; got %.2f\n",
                      a->agc_max_gain_db);
+        return false;
+      }
+    } else if (flag == "--aec-filter-blocks" && i + 1 < argc) {
+      try {
+        a->aec_filter_blocks = std::stoi(argv[++i]);
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "could not parse --aec-filter-blocks value '%s': %s\n",
+                     argv[i], e.what());
+        return false;
+      }
+      if (a->aec_filter_blocks < 9 || a->aec_filter_blocks > 20) {
+        std::fprintf(stderr,
+                     "--aec-filter-blocks must be in [9, 20]; got %d\n",
+                     a->aec_filter_blocks);
         return false;
       }
     } else if (flag == "-h" || flag == "--help") {
@@ -211,6 +233,10 @@ int main(int argc, char** argv) {
   // APM config at Init time and cannot be changed on a running chain.
   if (args.agc_max_gain_db >= 0.0f) {
     chain.SetAgcMaxGainDb(args.agc_max_gain_db);
+  }
+  // Same pre-Init contract for the AEC3 filter-length override.
+  if (args.aec_filter_blocks > 0) {
+    chain.SetAecFilterLengthBlocks(args.aec_filter_blocks);
   }
   const bool chain_ok = args.bypass_beamformer
       ? chain.Init(sample_rate_hz, num_mics)
@@ -318,6 +344,9 @@ int main(int argc, char** argv) {
               s.cpu_bf_s, s.cpu_aec_s, s.cpu_ns_s, s.cpu_agc_s, s.cpu_render_s);
   if (args.agc_enabled && args.agc_max_gain_db >= 0.0f) {
     std::printf("(max_gain_db=%.0f)", args.agc_max_gain_db);
+  }
+  if (args.aec_filter_blocks > 0) {
+    std::printf("  aec_filter_blocks=%d", args.aec_filter_blocks);
   }
   if (s.echo_return_loss_enhancement_db.has_value()) {
     std::printf("  erle_db=%.2f", *s.echo_return_loss_enhancement_db);

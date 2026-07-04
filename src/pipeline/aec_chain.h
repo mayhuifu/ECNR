@@ -175,6 +175,14 @@ class AecChain {
   // be called between frames.
   void SetAgcEnabled(bool enabled);
 
+  // Override AEC3's refined+coarse adaptive-filter length in 4 ms blocks
+  // (WebRTC default 13 = 52 ms modelled echo tail). CPU lever for the A55:
+  // AEC3 filter apply/adapt cost is linear in length. 0 = WebRTC default.
+  // **Must be called BEFORE Init()** (baked into APM construction, same
+  // contract as SetAgcMaxGainDb). Out-of-band values are clamped to
+  // [4, 20] by the adapter.
+  void SetAecFilterLengthBlocks(int blocks);
+
   // Override AGC2's adaptive-digital max_gain_db cap (WebRTC default = 50).
   // Lower values reduce noise-floor amplification between speech bursts;
   // higher values produce louder speech at the cost of audible noise.

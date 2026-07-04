@@ -20,6 +20,7 @@ struct AecChain::Impl {
   Agc2Adapter agc;
   bool agc_enabled = false;        // post-NS AGC stage; default OFF
   float agc_max_gain_db = 50.0f;   // WebRTC default; override via SetAgcMaxGainDb
+  int aec_filter_blocks = 0;       // 0 = WebRTC default (13); see SetAecFilterLengthBlocks
   ChainStats stats;
   int sample_rate_hz = 0;
   int num_mics = 0;
@@ -38,6 +39,7 @@ bool AecChain::Init(int sample_rate_hz, int num_mics,
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
   if (!IsSupportedMicCount(num_mics)) return false;
   if (!impl_->beamformer.Init(sample_rate_hz, num_mics, geometry)) return false;
+  impl_->aec3.SetFilterLengthBlocks(impl_->aec_filter_blocks);
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
   if (!impl_->ns.Init(sample_rate_hz)) return false;
   if (!impl_->agc.Init(sample_rate_hz, impl_->agc_max_gain_db)) return false;
@@ -176,6 +178,11 @@ void AecChain::SetNsVadBlendRange(float low, float high) {
 
 void AecChain::SetAgcEnabled(bool enabled) {
   impl_->agc_enabled = enabled;
+}
+
+void AecChain::SetAecFilterLengthBlocks(int blocks) {
+  // Stored for the next Init(), same lifecycle as SetAgcMaxGainDb.
+  impl_->aec_filter_blocks = blocks;
 }
 
 void AecChain::SetAgcMaxGainDb(float max_gain_db) {

@@ -78,6 +78,17 @@ target_compile_options(ecnr_rnnoise PRIVATE -Wno-unused-function -Wno-sign-compa
 # float weights live OUTSIDE the DISABLE_DEBUG_FLOAT block in
 # rnnoise_data.c and are untouched.
 target_compile_definitions(ecnr_rnnoise PRIVATE DISABLE_DEBUG_FLOAT)
+# U300 tune (spec 2026-07-04 M4): Cortex-A55 implements the ARMv8.2 Dot
+# Product instructions, and RNNoise's int8 GEMV (vec_neon.h) keys its
+# fastest path on __ARM_FEATURE_DOTPROD. The Poky stand-in SDK tunes for
+# cortexa57 (ARMv8.0) which leaves that path dead. Appended after the SDK
+# flags so -mcpu wins for this target only — scoped to the RNNoise hot
+# lib, not the whole build, so nothing else strays from the SDK tune.
+# qemu-user's default 'max' CPU executes SDOT; A57-class silicon would
+# not, which is fine: the deployment target is the U300's A55.
+if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  target_compile_options(ecnr_rnnoise PRIVATE -mcpu=cortex-a55)
+endif()
 
 # --- googletest -----------------------------------------------------------------
 FetchContent_Declare(
@@ -108,6 +119,27 @@ target_link_libraries(ecnr_pipeline PUBLIC ecnr_core)
 # *_adapter.cc files reference those types. Keep PRIVATE so the public
 # AecChain header stays clean.
 target_link_libraries(ecnr_pipeline PRIVATE webrtc::apm ecnr_rnnoise PkgConfig::SPEEXDSP)
+# aec3_adapter.cc builds a tuned EchoControlFactory around EchoCanceller3,
+# whose header is not part of the installed API — include it from the
+# vendored source tree (same pinned revision the archive was built from,
+# so the duplicated public headers are byte-identical with the install).
+target_include_directories(ecnr_pipeline PRIVATE
+  vendor/webrtc-audio-processing
+  vendor/webrtc-audio-processing/webrtc
+)
+# Platform defines the vendored headers key on — must mirror what the
+# Meson build compiled the archive with (meson.build:77-110) or the
+# header-side types diverge from the object code.
+if(APPLE)
+  target_compile_definitions(ecnr_pipeline PRIVATE WEBRTC_POSIX WEBRTC_MAC)
+elseif(UNIX)
+  target_compile_definitions(ecnr_pipeline PRIVATE WEBRTC_POSIX WEBRTC_LINUX)
+endif()
+target_compile_definitions(ecnr_pipeline PRIVATE WEBRTC_APM_DEBUG_DUMP=0)
+# The vendored headers are not -Wpedantic-clean under our warning set;
+# keep project warnings for our code but drop the nullability noise the
+# apple clang extension check adds on scoped_refptr.h.
+target_compile_options(ecnr_pipeline PRIVATE -Wno-nullability-extension -Wno-nullability-completeness)
 
 # --- ecnr_hal (file I/O via libsndfile) ----------------------------------------
 add_library(ecnr_hal STATIC

@@ -43,6 +43,24 @@ class Aec3Adapter {
   // Returns false on unsupported rate or if APM construction fails.
   bool Init(int sample_rate_hz);
 
+  // Override AEC3's adaptive-filter length in 4 ms blocks for BOTH the
+  // refined and coarse filters (WebRTC default: 13 blocks = 52 ms modelled
+  // echo tail). Automotive cabins have short RT60 (~50 ms mid-band), so
+  // shorter filters are a CPU lever in principle — filter apply + adapt
+  // cost is linear in length. Measured 2026-07-04 on the host (NEON-off
+  // APM build): cpu_aec is flat across 9-13 blocks, i.e. the host AEC3
+  // budget is dominated by the matched-filter delay estimator + FFTs,
+  // not the main filters. Retained as an ADR-0011 tuning knob for
+  // Phase-2 cabin RT60 work (shorter tails also converge faster);
+  // re-evaluate as a CPU lever on-target where NEON shifts the mix.
+  // 0 = keep WebRTC defaults (production default).
+  // **Must be called BEFORE Init()** — the config is baked into the
+  // EchoControlFactory at APM construction. Values are clamped to
+  // [9, 20] (below 9, APM's RenderDelayBuffer sizing aborts); the
+  // initial-convergence filters are capped at the same length when it
+  // drops below their 12-block default.
+  void SetFilterLengthBlocks(int blocks);
+
   // Drop AEC3 adapted state (re-runs APM Initialize). Not real-time safe —
   // call only between streams (session boundary), never on the audio thread
   // mid-frame.
