@@ -28,7 +28,15 @@ ARG DEBIAN_FRONTEND=noninteractive
 # play (rnnoise upstream is autotools; webrtc-apm is meson; ecnr_bench
 # is cmake). pkg-config + libtool round out the autotools chain.
 # python3-pkg-resources is for Meson; xz-utils for the SDK installer.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt over https with retries: observed 2026-07-04 that Docker Desktop's
+# amd64-emulation network path intermittently kills large plain-http
+# fetches from deb.debian.org (its internal proxy dropped the ~8 MB
+# Packages index at KB/s rates → exit 100). https rides a different
+# proxy path and Acquire::Retries absorbs the flakes.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         autoconf automake libtool pkg-config \
         cmake meson ninja-build \
         build-essential file git curl ca-certificates xz-utils \
