@@ -16,7 +16,11 @@ namespace ecnr {
 // Storage is sized for the maximum (kMaxMics × kFrameSamples48k) so a Frame is
 // stack-allocatable and cache-friendly with no audio-thread allocations. Only
 // the active subrange `[0, n_channels) × [0, n_samples)` is meaningful — the
-// rest is uninitialized scratch and must not be read.
+// rest is uninitialized scratch and must not be read. `ch` is deliberately
+// NOT value-initialized: `ch{}` would memset all 7.68 KB on every
+// construction, and AecChain::ProcessCapture constructs two Frames per
+// 10 ms frame — ~15 KB/frame of dead stores that also churn the A55's
+// 32 KB L1D. Writers must fill [0, n_samples) before publishing a frame.
 inline constexpr int kMaxMics = 8;
 inline constexpr int kFrameDurationMs = 10;
 inline constexpr int kFrameSamples16k = 160;
@@ -25,7 +29,7 @@ inline constexpr int kFrameSamples48k = 480;
 struct Frame {
   int n_samples = kFrameSamples16k;            // 160 (16k) or 480 (48k)
   int n_channels = 1;                          // 1..kMaxMics
-  std::array<std::array<int16_t, kFrameSamples48k>, kMaxMics> ch{};  // ch[c][s]
+  std::array<std::array<int16_t, kFrameSamples48k>, kMaxMics> ch;  // ch[c][s]
 };
 
 // Pure helpers used by AecChain::Init and Beamformer::Init to validate args.
