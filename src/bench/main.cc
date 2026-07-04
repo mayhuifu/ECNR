@@ -311,6 +311,11 @@ int main(int argc, char** argv) {
               file_mic_channels,
               args.bypass_beamformer ? "bypass" : "dsb",
               args.agc_enabled ? "on" : "off");
+  // Per-stage split (cumulative seconds). Extra key=value columns are
+  // ignored by older parsers (run_aec_challenge.py splits on '=' and
+  // tolerates unknown keys).
+  std::printf("  cpu_bf=%.3fs  cpu_aec=%.3fs  cpu_ns=%.3fs  cpu_agc=%.3fs  cpu_render=%.3fs",
+              s.cpu_bf_s, s.cpu_aec_s, s.cpu_ns_s, s.cpu_agc_s, s.cpu_render_s);
   if (args.agc_enabled && args.agc_max_gain_db >= 0.0f) {
     std::printf("(max_gain_db=%.0f)", args.agc_max_gain_db);
   }

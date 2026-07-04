@@ -65,8 +65,9 @@ void AecChain::ProcessRender(const Frame& render) {
   const auto t0 = std::chrono::steady_clock::now();
   impl_->aec3.ProcessRender(render);
   const auto t1 = std::chrono::steady_clock::now();
-  impl_->stats.cpu_time_s +=
-      std::chrono::duration<double>(t1 - t0).count();
+  const double dt = std::chrono::duration<double>(t1 - t0).count();
+  impl_->stats.cpu_time_s += dt;
+  impl_->stats.cpu_render_s += dt;
 }
 
 void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
@@ -90,15 +91,23 @@ void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
 
   Frame post_bf;
   impl_->beamformer.Process(mic_in, post_bf);
+  const auto t_bf = std::chrono::steady_clock::now();
 
   Frame post_aec;
   impl_->aec3.ProcessCapture(post_bf, post_aec);
+  const auto t_aec = std::chrono::steady_clock::now();
   impl_->ns.Process(post_aec);
+  const auto t_ns = std::chrono::steady_clock::now();
   // Post-NS AGC (ADR-0001 architecture). Off by default to preserve
   // historical bench/live behaviour; ecnr_bench / ecnr_live opt in.
   if (impl_->agc_enabled) {
     impl_->agc.Process(post_aec);
   }
+  const auto t_agc = std::chrono::steady_clock::now();
+  impl_->stats.cpu_bf_s  += std::chrono::duration<double>(t_bf - t0).count();
+  impl_->stats.cpu_aec_s += std::chrono::duration<double>(t_aec - t_bf).count();
+  impl_->stats.cpu_ns_s  += std::chrono::duration<double>(t_ns - t_aec).count();
+  impl_->stats.cpu_agc_s += std::chrono::duration<double>(t_agc - t_ns).count();
 
   uplink_out.n_channels = 1;
   uplink_out.n_samples = post_aec.n_samples;

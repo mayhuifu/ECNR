@@ -25,6 +25,17 @@ struct ChainStats {
   // Cumulative seconds of audio passed through the chain.
   double audio_time_s = 0.0;
 
+  // Per-stage cumulative wallclock seconds (capture path unless noted).
+  // Sum of the five ≈ cpu_time_s minus loop glue. Always-on: five
+  // steady_clock reads per frame are noise next to the stages themselves,
+  // and having the split in production stats is how perf regressions get
+  // attributed on-target (A55) without a rebuild.
+  double cpu_bf_s = 0.0;      // Beamformer
+  double cpu_aec_s = 0.0;     // AEC3 APM ProcessStream (capture)
+  double cpu_ns_s = 0.0;      // RNNoise + 16↔48 kHz resample
+  double cpu_agc_s = 0.0;     // AGC2 APM ProcessStream (0 when AGC off)
+  double cpu_render_s = 0.0;  // AEC3 APM ProcessReverseStream (render path)
+
   // ERLE = 10*log10(P_echo / P_out). Mirrors
   // webrtc::AudioProcessingStats::echo_return_loss_enhancement.
   std::optional<double> echo_return_loss_enhancement_db;
