@@ -154,6 +154,25 @@ Notes on the qemu RTF:
 2. **CI integration** (deferred): the cross-build is reproducible and could run in GitHub Actions. Holding off until ADR-0001 A7 is fully closed against the real U300 SDK.
 3. **Binary-size reduction** (in progress, see perf/size work stream): the 14.84 MB `.rodata` is dominated by RNNoise weights, and ~11 MB of that appears to be float-weight tables that are dead with the current `compute_linear` branch order. Concrete experiments queued: switch to `int8` path (saves both binary size and runs faster on A55's DotProd ext); strip in Release builds (already validated as a −1.9 MB free win above).
 
+## 2026-07-04 re-run attempt (M4 DotProd tune — pending)
+
+The perf-loop session added `-mcpu=cortex-a55` to `ecnr_rnnoise` on aarch64
+cross-builds (CMakeLists M4): Cortex-A55 ships the ARMv8.2 Dot Product
+instructions and RNNoise's int8 GEMV keys its fastest path on
+`__ARM_FEATURE_DOTPROD`, which the cortexa57 stand-in tune never enabled.
+Re-measuring the qemu RTF with that flag **did not complete**: the Docker
+image had been pruned since May, and the rebuild was blocked by a throttled
+network path (Docker Desktop's amd64-emulation proxy delivered deb.debian.org
+at ~1.5 KB/s and killed the Packages fetch; host-side transfers to Zenodo the
+same afternoon crawled at ~50 KB/s — environment, not config). The Dockerfile
+apt step is now hardened (https + `Acquire::Retries=5`).
+
+**Rerun on a healthy network:** `scripts/cross-build-yocto/build.sh --smoke`
+— expect the int8 rows above to improve further from SDOT in
+`sparse_cgemv8x4` (qemu executes it via the default `max` CPU), and re-check
+the Frame zero-init removal (M1) which is host-invisible but targets the
+A55's 32 KB L1D. Neither number is claimed until measured.
+
 ## Cost note
 
 The first full run (image build incl. SDK download) took **~97 minutes** end-to-end, dominated by Rosetta-emulated execution of the SDK's installer script. Subsequent runs are fast: Docker layer cache short-circuits the image build, and `build-aarch64/` is incremental. The container size is ~7 GB (SDK is ~5 GB unpacked).
