@@ -63,7 +63,13 @@ struct Args {
   std::string out_csv;
   std::string out_wavs_dir;  // optional; if set, write per-condition output WAVs here
   std::string stage_wavs_dir; // optional; if set, write per-stage diagnostic WAVs
-  bool agc_enabled = false;  // optional post-NS AGC2 (mirrors ecnr_bench --agc)
+  // Post-NS AGC2. **Default ON** to match the production chain default
+  // (v0.4.1, ADR-0012 A6) — the GB/T 45314 gate must grade the
+  // release-candidate configuration, not the legacy AGC-off one.
+  // --no-agc opts out for A/B against the pre-v0.4.1 baseline; the
+  // echo-only ERLE pass still forces AGC off internally (gain would
+  // corrupt the ERLE math).
+  bool agc_enabled = true;
   // RNNoise blend controls mirror ecnr_bench/ecnr_live so pre-compliance
   // gates can sweep production tuning without a separate tool path.
   float ns_dry_blend = 0.0f;
@@ -76,7 +82,8 @@ void PrintUsage(const char* prog) {
   std::fprintf(stderr,
       "usage: %s --self-test\n"
       "       %s --run --conditions DIR --out FILE.csv [--out-wavs WAV_DIR]\n"
-      "          [--agc] [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n"
+      "          [--agc|--no-agc] [--ns-dry-blend <0..1>] | [--ns-vad-blend <low,high>]\n"
+      "          (AGC2 defaults ON — the v0.4.1+ production config; --no-agc opts out)\n"
       "\n"
       "  --self-test           in-memory synthetic fixture; asserts ERLE looks healthy.\n"
       "                        No file I/O. Used as CI smoke + harness hello-world.\n"
@@ -103,6 +110,7 @@ bool ParseArgs(int argc, char** argv, Args* a) {
     else if (flag == "--out-wavs" && i + 1 < argc) a->out_wavs_dir = argv[++i];
     else if (flag == "--stage-wavs" && i + 1 < argc) a->stage_wavs_dir = argv[++i];
     else if (flag == "--agc") a->agc_enabled = true;
+    else if (flag == "--no-agc") a->agc_enabled = false;
     else if (flag == "--ns-dry-blend" && i + 1 < argc) {
       try {
         a->ns_dry_blend = std::stof(argv[++i]);

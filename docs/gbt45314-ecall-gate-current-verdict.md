@@ -1,5 +1,29 @@
 # GB/T 45314 eCall gate current verdict
 
+## Re-verdict 2026-07-04 — gate ported to main (v0.4.1+ chain, AGC-on default)
+
+**Chain under test:** `main` post-v0.4.1 (AGC2 on by default per ADR-0012 A6, int8 RNNoise, rnnoise_default NS). `ecnr_eval` now also defaults AGC **on** so the gate grades the production configuration by default (`--no-agc` opts out).
+
+**Overall: BLOCK** — unchanged from 2026-05-27, and for the same reason. The chain's behaviour is stable across the v0.3 → v0.4.1 arc (default-config numbers reproduce to 0.01 dB):
+
+| Config | B2 noise range (<10 dB) | DT near-end delta (≥−12 dB) / corr (≥0.60) | Far-end TCL / convergence / time-varying | Overall |
+|---|---:|---:|---|---|
+| production default (AGC on) | 47.52 dB **FAIL** | −24.75 dB / 0.00 **FAIL** | 3× PASS | BLOCK |
+| + `--ns-dry-blend 0.20` (eCall preset candidate) | **PASS** (9.0 dB) | −23.98 dB / −0.05 **FAIL** | 3× PASS (headroom WARN: steady ERLE 44.2 dB < 55 dB target) | BLOCK |
+| `--no-agc` (pre-v0.4.1 legacy) | 48.09 dB FAIL | −39.96 dB / 0.00 FAIL | 3× PASS | BLOCK |
+
+Reading:
+
+- **B2 is solved by the known preset** (`--ns-dry-blend 0.20`), now re-confirmed on the AGC-on chain. Promoting it to an emergency-call preset remains a product decision (it trades ~36 dB of steady-state echo headroom, staying above the hard floors), pending validation on real cabin audio.
+- **Double-talk remains the sole hard blocker** and is unchanged: stage-tap evidence (below, 2026-05-27) localizes the near-end loss to AEC3's nonlinear suppression, upstream of RNNoise and AGC. This is the third independent corpus pointing at the same gap (AEC-Challenge ST_FE structural dnsmos_sig, cabin-demo over-suppression, GB/T 45314 5.7 DT) — the Phase-3 neural RES work item.
+- The perceptual AEC-Challenge gate (ADR-0012) stays **PASS** on the same binary — the two gates measure different things by design: AECMOS grades DT at ~3.3 (fair) on real conversational recordings; the GB proxy measures near-end level preservation against a −6 dB driver under continuous far-end, which is the harsher eCall-style condition.
+
+The 2026-05-27 analysis below remains the authoritative diagnosis; nothing in v0.4.x moved it.
+
+---
+
+## Original verdict 2026-05-27
+
 **Date:** 2026-05-27
 **Baseline:** `v0.3` / `0df3406`
 **Branch under test:** `codex/gb45314-release-gate`
