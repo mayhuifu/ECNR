@@ -55,7 +55,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build meson pkg-config \
-            libsndfile1-dev libspeexdsp-dev libabsl-dev python3-pip
+            libsndfile1-dev libspeexdsp-dev python3-pip
           # jammy's apt meson is 0.61; vendor/webrtc-audio-processing
           # requires >= 0.63. pip meson lands in /usr/local/bin which
           # precedes /usr/bin on the runner PATH.
@@ -63,6 +63,38 @@ jobs:
           python3 --version
           cmake --version
           meson --version
+
+      # jammy's libabsl-dev (20210324) predates absl/base/nullability.h,
+      # which webrtc-audio-processing-2's installed public headers include.
+      # Building one modern abseil and pointing BOTH our cmake targets and
+      # the vendored Meson build at it mirrors the local-dev topology
+      # (single absl everywhere; no mixed-version link against the copy
+      # the Meson build would otherwise vendor in as a subproject).
+      - name: Cache abseil install
+        id: cache-absl
+        uses: actions/cache@v4
+        with:
+          path: ~/absl-install
+          key: absl-20240722.1-${{ runner.os }}-jammy-v1
+
+      - name: Build abseil from source
+        if: steps.cache-absl.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 20240722.1 \
+            https://github.com/abseil/abseil-cpp.git /tmp/absl-src
+          cmake -S /tmp/absl-src -B /tmp/absl-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 \
+            -DABSL_PROPAGATE_CXX_STD=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DABSL_BUILD_TESTING=OFF -DABSL_ENABLE_INSTALL=ON \
+            -DCMAKE_INSTALL_PREFIX="$HOME/absl-install"
+          cmake --build /tmp/absl-build -j$(nproc)
+          cmake --install /tmp/absl-build
+
+      - name: Expose abseil to pkg-config + cmake
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/absl-install/lib/pkgconfig:$HOME/absl-install/lib/x86_64-linux-gnu/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$HOME/absl-install" >> "$GITHUB_ENV"
+          pkg-config --modversion absl_strings || ls "$HOME/absl-install/lib" "$HOME/absl-install/lib/pkgconfig" 2>/dev/null || true
 
       - name: Cache vendor/ (rnnoise + speexdsp pinned sources)
         id: cache-vendor
@@ -81,9 +113,11 @@ jobs:
           path: build
           # Invalidate when the chain code or build wiring changes; not on
           # eval-only changes (those don't recompile C++).
-          key: build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**/*.cc', 'src/**/*.h', 'vendor/MANIFEST.tsv') }}
+          # v2 suffix: bust caches from the pre-absl-fix era whose
+          # webrtc-apm-install was built against the bundled subproject absl.
+          key: build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**/*.cc', 'src/**/*.h', 'vendor/MANIFEST.tsv') }}
           restore-keys: |
-            build-${{ runner.os }}-
+            build-v2-${{ runner.os }}-
 
       - name: Configure + build ecnr_bench
         run: |
