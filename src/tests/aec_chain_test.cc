@@ -625,5 +625,48 @@ TEST(AecChain, ProcessesAt8Mics) {
   EXPECT_EQ(out.n_samples, kFrameSamples16k);
 }
 
+// GB/T 45314 §5.7 tuning surface: parses, applies pre-Init, and the chain
+// still runs frames cleanly with an extreme-but-valid transparency config.
+TEST(AecChainTest, DtTuningParsesAndInits) {
+  AecDtTuning t;
+  std::string err;
+  ASSERT_TRUE(ParseAecDtTuning(
+      "enr=2.0,snr=10,trigger=3,hold=100,mask_t=20,mask_s=30,"
+      "mask_hf_t=20,mask_hf_s=30,dec_lf=0.1",
+      &t, &err))
+      << err;
+  EXPECT_TRUE(t.Any());
+  EXPECT_FLOAT_EQ(t.nearend_enr_threshold, 2.0f);
+  EXPECT_EQ(t.nearend_trigger_threshold, 3);
+  EXPECT_FLOAT_EQ(t.mask_hf_enr_suppress, 30.0f);
+
+  // Unknown keys and malformed pairs are rejected with a message.
+  AecDtTuning bad;
+  EXPECT_FALSE(ParseAecDtTuning("bogus=1", &bad, &err));
+  EXPECT_FALSE(ParseAecDtTuning("enr", &bad, &err));
+
+  AecChain c;
+  c.SetAecDtTuning(t);
+  ASSERT_TRUE(c.Init(16000, 2));
+
+  std::mt19937 rng(0x5314);
+  std::uniform_int_distribution<int> dist(-2000, 2000);
+  Frame far, mic, out;
+  far.n_channels = 1;
+  far.n_samples = kFrameSamples16k;
+  mic.n_channels = 2;
+  mic.n_samples = kFrameSamples16k;
+  for (int i = 0; i < 50; ++i) {
+    for (int s = 0; s < far.n_samples; ++s) far.ch[0][s] = dist(rng);
+    for (int ch = 0; ch < 2; ++ch) {
+      for (int s = 0; s < mic.n_samples; ++s) mic.ch[ch][s] = dist(rng);
+    }
+    c.ProcessRender(far);
+    c.ProcessCapture(mic, out);
+  }
+  EXPECT_EQ(c.Stats().frames_dropped, 0u);
+  EXPECT_EQ(out.n_channels, 1);
+}
+
 }  // namespace
 }  // namespace ecnr

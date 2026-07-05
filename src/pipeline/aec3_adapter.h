@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "core/frame.h"
+#include "pipeline/aec_tuning.h"
 
 namespace ecnr {
 
@@ -60,6 +61,12 @@ class Aec3Adapter {
   // initial-convergence filters are capped at the same length when it
   // drops below their 12-block default.
   void SetFilterLengthBlocks(int blocks);
+
+  // Override AEC3 suppressor double-talk transparency (GB/T 45314 §5.7 —
+  // see aec_tuning.h for field semantics). Sentinel-negative fields keep
+  // WebRTC defaults. **Must be called BEFORE Init()** — baked into the
+  // EchoControlFactory at APM construction, same as SetFilterLengthBlocks.
+  void SetDtTuning(const AecDtTuning& tuning);
 
   // Drop AEC3 adapted state (re-runs APM Initialize). Not real-time safe —
   // call only between streams (session boundary), never on the audio thread

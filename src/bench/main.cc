@@ -55,6 +55,9 @@ struct Args {
   // default 13 = 52 ms tail). A55 CPU lever under evaluation (spec
   // 2026-07-04 M7); 0 = WebRTC default.
   int aec_filter_blocks = 0;
+  // AEC3 double-talk transparency overrides (GB/T 45314 §5.7 sweeps;
+  // see src/pipeline/aec_tuning.h). All-sentinel = WebRTC defaults.
+  ecnr::AecDtTuning aec3_tuning;
 };
 
 void PrintUsage(const char* prog) {
@@ -84,7 +87,11 @@ void PrintUsage(const char* prog) {
                "  --aec-filter-blocks N  override AEC3 refined+coarse filter length in\n"
                "                       4 ms blocks (WebRTC default 13 = 52 ms tail).\n"
                "                       Range 9..20. ADR-0011 tuning knob for cabin\n"
-               "                       RT60 fitting; no host CPU effect measured.\n",
+               "                       RT60 fitting; no host CPU effect measured.\n"
+               "  --aec3-tune SPEC     AEC3 suppressor double-talk transparency overrides\n"
+               "                       as k=v[,k=v...]; keys enr|snr|hold|trigger|mask_t|\n"
+               "                       mask_s|dec_lf (GB/T 45314 §5.7; see\n"
+               "                       src/pipeline/aec_tuning.h for semantics).\n",
                prog);
 }
 
@@ -150,6 +157,12 @@ bool ParseArgs(int argc, char** argv, Args* a) {
         std::fprintf(stderr,
                      "--aec-filter-blocks must be in [9, 20]; got %d\n",
                      a->aec_filter_blocks);
+        return false;
+      }
+    } else if (flag == "--aec3-tune" && i + 1 < argc) {
+      std::string err;
+      if (!ecnr::ParseAecDtTuning(argv[++i], &a->aec3_tuning, &err)) {
+        std::fprintf(stderr, "--aec3-tune: %s\n", err.c_str());
         return false;
       }
     } else if (flag == "-h" || flag == "--help") {
@@ -237,6 +250,9 @@ int main(int argc, char** argv) {
   // Same pre-Init contract for the AEC3 filter-length override.
   if (args.aec_filter_blocks > 0) {
     chain.SetAecFilterLengthBlocks(args.aec_filter_blocks);
+  }
+  if (args.aec3_tuning.Any()) {
+    chain.SetAecDtTuning(args.aec3_tuning);
   }
   const bool chain_ok = args.bypass_beamformer
       ? chain.Init(sample_rate_hz, num_mics)
@@ -344,6 +360,9 @@ int main(int argc, char** argv) {
               s.cpu_bf_s, s.cpu_aec_s, s.cpu_ns_s, s.cpu_agc_s, s.cpu_render_s);
   if (args.agc_enabled && args.agc_max_gain_db >= 0.0f) {
     std::printf("(max_gain_db=%.0f)", args.agc_max_gain_db);
+  }
+  if (args.aec3_tuning.Any()) {
+    std::printf("  aec3_dt_tuned=1");
   }
   if (args.aec_filter_blocks > 0) {
     std::printf("  aec_filter_blocks=%d", args.aec_filter_blocks);

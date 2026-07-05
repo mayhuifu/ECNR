@@ -51,6 +51,8 @@ struct Aec3Adapter::Impl {
   int sample_rate_hz = 0;
   // 0 = WebRTC default filter lengths (13 blocks). See SetFilterLengthBlocks.
   int filter_length_blocks = 0;
+  // All-sentinel = WebRTC default suppressor behaviour. See SetDtTuning.
+  AecDtTuning dt_tuning;
   // Scratch buffer for ProcessReverseStream's `dest` parameter — APM requires
   // a writable destination even when we don't consume the post-process render.
   // Sized for the largest supported rate (48 kHz, mono, 10 ms = 480 samples).
@@ -70,21 +72,51 @@ void Aec3Adapter::SetFilterLengthBlocks(int blocks) {
       blocks <= 0 ? 0 : std::clamp(blocks, 9, 20);
 }
 
+void Aec3Adapter::SetDtTuning(const AecDtTuning& tuning) {
+  // Stored for the next Init(); Validate() sanitizes structural nonsense
+  // (e.g. transparent > suppress mask inversions) at config-build time.
+  impl_->dt_tuning = tuning;
+}
+
 bool Aec3Adapter::Init(int sample_rate_hz) {
   if (!IsSupportedSampleRate(sample_rate_hz)) return false;
 
   webrtc::AudioProcessingBuilder builder;
-  if (impl_->filter_length_blocks > 0) {
-    const size_t n = static_cast<size_t>(impl_->filter_length_blocks);
+  const AecDtTuning& dt = impl_->dt_tuning;
+  if (impl_->filter_length_blocks > 0 || dt.Any()) {
     webrtc::EchoCanceller3Config cfg3;
-    cfg3.filter.refined.length_blocks = n;
-    cfg3.filter.coarse.length_blocks = n;
-    // Initial-convergence filters default to 12 blocks; they must not
-    // exceed the steady-state filters.
-    cfg3.filter.refined_initial.length_blocks =
-        std::min(cfg3.filter.refined_initial.length_blocks, n);
-    cfg3.filter.coarse_initial.length_blocks =
-        std::min(cfg3.filter.coarse_initial.length_blocks, n);
+    if (impl_->filter_length_blocks > 0) {
+      const size_t n = static_cast<size_t>(impl_->filter_length_blocks);
+      cfg3.filter.refined.length_blocks = n;
+      cfg3.filter.coarse.length_blocks = n;
+      // Initial-convergence filters default to 12 blocks; they must not
+      // exceed the steady-state filters.
+      cfg3.filter.refined_initial.length_blocks =
+          std::min(cfg3.filter.refined_initial.length_blocks, n);
+      cfg3.filter.coarse_initial.length_blocks =
+          std::min(cfg3.filter.coarse_initial.length_blocks, n);
+    }
+    // Double-talk transparency overrides (GB/T 45314 §5.7, aec_tuning.h).
+    auto& sup = cfg3.suppressor;
+    if (dt.nearend_enr_threshold >= 0.0f)
+      sup.dominant_nearend_detection.enr_threshold = dt.nearend_enr_threshold;
+    if (dt.nearend_snr_threshold >= 0.0f)
+      sup.dominant_nearend_detection.snr_threshold = dt.nearend_snr_threshold;
+    if (dt.nearend_hold_duration >= 0)
+      sup.dominant_nearend_detection.hold_duration = dt.nearend_hold_duration;
+    if (dt.nearend_trigger_threshold >= 0)
+      sup.dominant_nearend_detection.trigger_threshold =
+          dt.nearend_trigger_threshold;
+    if (dt.mask_lf_enr_transparent >= 0.0f)
+      sup.nearend_tuning.mask_lf.enr_transparent = dt.mask_lf_enr_transparent;
+    if (dt.mask_lf_enr_suppress >= 0.0f)
+      sup.nearend_tuning.mask_lf.enr_suppress = dt.mask_lf_enr_suppress;
+    if (dt.mask_hf_enr_transparent >= 0.0f)
+      sup.nearend_tuning.mask_hf.enr_transparent = dt.mask_hf_enr_transparent;
+    if (dt.mask_hf_enr_suppress >= 0.0f)
+      sup.nearend_tuning.mask_hf.enr_suppress = dt.mask_hf_enr_suppress;
+    if (dt.max_dec_factor_lf >= 0.0f)
+      sup.nearend_tuning.max_dec_factor_lf = dt.max_dec_factor_lf;
     // Upstream sanitizer: clamps anything structurally invalid in place.
     webrtc::EchoCanceller3Config::Validate(&cfg3);
     builder.SetEchoControlFactory(std::make_unique<TunedAec3Factory>(cfg3));

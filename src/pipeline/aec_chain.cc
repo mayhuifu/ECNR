@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 
 #include "core/frame.h"
@@ -12,6 +13,42 @@
 #include "pipeline/rnnoise_adapter.h"
 
 namespace ecnr {
+
+namespace {
+// Mode-controller constants (GB/T 45314 §5.7 echo-aware NS gate).
+// Render counts as active above −50 dBFS frame RMS; the hangover covers
+// the echo tail after render stops (cabin RT60 is short — ADR-0002 — and
+// AEC3 models 52 ms; 300 ms is a comfortable envelope).
+constexpr double kRenderActiveMeanSquare =
+    (32768.0 * 0.00316) * (32768.0 * 0.00316);  // −50 dBFS
+constexpr int kRenderHangoverFrames = 30;       // × 10 ms = 300 ms
+// Post/pre-AEC amplitude ratio mapping to the gate. Measured on the GB/T
+// conditions (2026-07-05): echo-only frames sit at r ≈ 0.013 (p50), DT
+// frames with a preserved near end reach 0.2+. Between the rails the gate
+// opens linearly.
+constexpr float kGateRatioLo = 0.05f;
+constexpr float kGateRatioHi = 0.25f;
+// Asymmetric one-pole on the gate: fast attack so near-end onsets open it
+// within ~2 frames, moderate decay so residual-echo mopping re-engages
+// quickly after the near end stops without chattering.
+constexpr float kGateAttack = 0.5f;
+constexpr float kGateDecay = 0.3f;
+// Leaky open-time budget: an abrupt echo-path change (GB/T 45314 §5.5.3)
+// makes AEC3 leak echo for the reconvergence window, which looks exactly
+// like near-end onset to the post/pre ratio — without a cap the gate stays
+// open and NS mopping disengages precisely when the linear filter is at
+// its weakest (measured 2026-07-05: erle_time_variation 8.5 dB > the 6 dB
+// clause limit). Near-end speech is syllabic — bursts of 200-400 ms with
+// pauses that replenish the budget — while reconvergence leak is one
+// sustained plateau, so a ~600 ms cap separates the two. Long uninterrupted
+// near-end monologue loses gate protection for its tail; §5.7 grade 2b
+// tolerates partial clipping, and the −12 dB level floor holds regardless
+// via the blend's `low` endpoint.
+constexpr int kGateBudgetFrames = 60;        // 600 ms of continuous open
+constexpr float kGateOpenThreshold = 0.5f;   // draining when above
+constexpr float kGateReplenishBelow = 0.3f;  // target below this replenishes
+constexpr int kGateReplenishPerFrame = 2;    // full refill in ~300 ms
+}  // namespace
 
 struct AecChain::Impl {
   Beamformer beamformer;
@@ -25,6 +62,12 @@ struct AecChain::Impl {
   int sample_rate_hz = 0;
   int num_mics = 0;
   int stream_delay_ms = 0;
+  // Mode-controller state: capture frames remaining in the "echo possible"
+  // window, the smoothed echo gate forwarded to the NS blend, and the
+  // leaky open-time budget bounding reconvergence leaks.
+  int render_hangover_frames = 0;
+  float echo_gate_smoothed = 1.0f;
+  int gate_budget_frames = kGateBudgetFrames;
 };
 
 AecChain::AecChain() : impl_(std::make_unique<Impl>()) {}
@@ -70,6 +113,16 @@ void AecChain::ProcessRender(const Frame& render) {
   const double dt = std::chrono::duration<double>(t1 - t0).count();
   impl_->stats.cpu_time_s += dt;
   impl_->stats.cpu_render_s += dt;
+
+  // Mode controller: mark the echo-possible window while the downlink is
+  // audible (plus hangover for the cabin echo tail).
+  double sum_sq = 0.0;
+  for (int i = 0; i < render.n_samples; ++i) {
+    sum_sq += static_cast<double>(render.ch[0][i]) * render.ch[0][i];
+  }
+  if (sum_sq / render.n_samples > kRenderActiveMeanSquare) {
+    impl_->render_hangover_frames = kRenderHangoverFrames;
+  }
 }
 
 void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
@@ -108,6 +161,52 @@ void AecChain::ProcessCaptureWithTaps(const Frame& mic_in, Frame& uplink_out,
   impl_->aec3.ProcessCapture(post_bf, post_aec);
   const auto t_aec = std::chrono::steady_clock::now();
   if (taps.post_aec) *taps.post_aec = post_aec;
+
+  // Mode controller (GB/T 45314 §5.7): how much of this frame survived
+  // AEC3? While render is recently active, a low post/pre ratio means the
+  // frame was echo-dominated — close the NS blend gate so RNNoise mops the
+  // residual at full strength. A high ratio means near-end speech is
+  // present — open the gate so the VAD blend can protect it. With render
+  // idle no echo is possible; the gate stays open and RNNoise's own VAD
+  // is the only authority. Uniform blends are unaffected (see
+  // RnNsAdapter::SetEchoGate).
+  float gate_target = 1.0f;
+  if (impl_->render_hangover_frames > 0) {
+    --impl_->render_hangover_frames;
+    double pre_sq = 0.0, post_sq = 0.0;
+    for (int i = 0; i < post_bf.n_samples; ++i) {
+      pre_sq += static_cast<double>(post_bf.ch[0][i]) * post_bf.ch[0][i];
+      post_sq += static_cast<double>(post_aec.ch[0][i]) * post_aec.ch[0][i];
+    }
+    if (pre_sq > 0.0) {
+      const float r = static_cast<float>(std::sqrt(post_sq / pre_sq));
+      gate_target = std::clamp(
+          (r - kGateRatioLo) / (kGateRatioHi - kGateRatioLo), 0.0f, 1.0f);
+    }
+    // pre_sq == 0: silent capture — nothing to protect or suppress; leave
+    // the gate at its open target.
+
+    // Leaky budget (constants above): sustained-open drains, quiet/echo-
+    // dominant frames replenish. Exhausted budget forces the gate shut so
+    // reconvergence leaks stay bounded to ~kGateBudgetFrames.
+    if (gate_target < kGateReplenishBelow) {
+      impl_->gate_budget_frames = std::min(
+          kGateBudgetFrames, impl_->gate_budget_frames + kGateReplenishPerFrame);
+    }
+    if (impl_->echo_gate_smoothed > kGateOpenThreshold) {
+      impl_->gate_budget_frames = std::max(0, impl_->gate_budget_frames - 1);
+    }
+    if (impl_->gate_budget_frames == 0) {
+      gate_target = 0.0f;
+    }
+  } else {
+    // Render idle: no echo possible, no reason to ration the gate.
+    impl_->gate_budget_frames = kGateBudgetFrames;
+  }
+  const float k = gate_target > impl_->echo_gate_smoothed ? kGateAttack
+                                                          : kGateDecay;
+  impl_->echo_gate_smoothed += k * (gate_target - impl_->echo_gate_smoothed);
+  impl_->ns.SetEchoGate(impl_->echo_gate_smoothed);
 
   impl_->ns.Process(post_aec);
   const auto t_ns = std::chrono::steady_clock::now();
@@ -162,6 +261,8 @@ void AecChain::Reset() {
   impl_->ns.Reset();
   impl_->agc.Reset();
   impl_->stats = {};
+  impl_->render_hangover_frames = 0;
+  impl_->echo_gate_smoothed = 1.0f;
 }
 
 void AecChain::SetStreamDelayMs(int delay_ms) {
@@ -183,6 +284,12 @@ void AecChain::SetAgcEnabled(bool enabled) {
 void AecChain::SetAecFilterLengthBlocks(int blocks) {
   // Stored for the next Init(), same lifecycle as SetAgcMaxGainDb.
   impl_->aec_filter_blocks = blocks;
+}
+
+void AecChain::SetAecDtTuning(const AecDtTuning& tuning) {
+  // Forwarded immediately; the adapter stores it until its Init() bakes
+  // the config into the EchoControlFactory (same lifecycle as above).
+  impl_->aec3.SetDtTuning(tuning);
 }
 
 void AecChain::SetAgcMaxGainDb(float max_gain_db) {

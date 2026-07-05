@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "core/frame.h"
+#include "pipeline/aec_tuning.h"
 #include "pipeline/mic_geometry.h"
 
 namespace ecnr {
@@ -182,6 +183,12 @@ class AecChain {
   // contract as SetAgcMaxGainDb). Out-of-band values are clamped to
   // [4, 20] by the adapter.
   void SetAecFilterLengthBlocks(int blocks);
+
+  // Override AEC3 suppressor double-talk transparency (GB/T 45314 §5.7
+  // driver-speech preservation; field semantics in aec_tuning.h). Sentinel-
+  // negative fields keep WebRTC defaults. **Must be called BEFORE Init()**
+  // (baked into APM construction, same contract as SetAecFilterLengthBlocks).
+  void SetAecDtTuning(const AecDtTuning& tuning);
 
   // Override AGC2's adaptive-digital max_gain_db cap (WebRTC default = 50).
   // Lower values reduce noise-floor amplification between speech bursts;

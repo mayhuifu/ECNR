@@ -40,6 +40,11 @@ struct RnNsAdapter::Impl {
   // ≈ 5 % per frame → ~140 ms half-life. Reasonable for speech rhythms.
   float vad_attack = 0.5f;
   float vad_decay = 0.05f;
+  // Echo-awareness gate from AecChain's mode controller (SetEchoGate).
+  // 1 = no echo in sight (blend span fully available); 0 = echo-dominant
+  // frame (blend pinned at vad_blend_low). Default 1 keeps standalone /
+  // legacy callers at pre-gate behaviour.
+  float echo_gate = 1.0f;
 
   ~Impl() {
     if (st) rnnoise_destroy(st);
@@ -106,6 +111,10 @@ void RnNsAdapter::SetVadBlendRange(float low, float high) {
   // Keep current_blend in sync for diagnostic getters called before any
   // Process(); uses the low value as the "no-voice" baseline.
   impl_->current_blend = impl_->vad_blend_low;
+}
+
+void RnNsAdapter::SetEchoGate(float gate01) {
+  impl_->echo_gate = gate01 < 0.0f ? 0.0f : gate01 > 1.0f ? 1.0f : gate01;
 }
 
 float RnNsAdapter::CurrentBlend() const { return impl_->current_blend; }
@@ -201,11 +210,11 @@ void RnNsAdapter::Process(Frame& f) {
   }
   // Compute the per-frame blend α by interpolating between the two
   // configured endpoints. When low == high this collapses to a uniform
-  // (Step-A) blend and the VAD has no effect — bit-exact backward
-  // compatibility for callers that only set SetDryBlend.
+  // (Step-A) blend and neither the VAD nor the echo gate has any effect —
+  // bit-exact backward compatibility for callers that only set SetDryBlend.
   const float alpha = impl_->vad_blend_low +
                       (impl_->vad_blend_high - impl_->vad_blend_low) *
-                          impl_->vad_smoothed;
+                          impl_->vad_smoothed * impl_->echo_gate;
   impl_->current_blend = alpha;
 
   // Wet/dry blend: out = α·input + (1−α)·rnnoise_output. Skipped at α=0 for

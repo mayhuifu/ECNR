@@ -56,10 +56,24 @@ class RnNsAdapter {
   // be called between frames.
   void SetVadBlendRange(float low, float high);
 
+  // Echo-awareness gate on the VAD-blend span, set per frame by AecChain's
+  // mode controller (GB/T 45314 §5.7 work). RNNoise's own VAD cannot tell
+  // near-end speech from residual far-end echo — both are speech-like — so
+  // an ungated VAD blend passes residual echo through during far-end single-
+  // talk and destroys the chain's TCL headroom. AecChain derives "how much
+  // of this frame survived AEC3" (post/pre energy ratio while render is
+  // active) and scales the blend span with it:
+  //   α = low + (high − low) · vad_smoothed · gate
+  // gate = 1 → normal VAD blend (no echo in sight); gate = 0 → α pinned at
+  // `low` (full NS mopping, echo-dominant frame). Uniform blends
+  // (low == high) are unaffected by construction. Clamped to [0, 1].
+  // Real-time safe; called per frame.
+  void SetEchoGate(float gate01);
+
   // Currently-active blend for the most recent processed frame (after
-  // VAD smoothing and interpolation). Useful for bench-line logging and
-  // for AecChain to surface into ChainStats. Returns the configured
-  // low value before the first Process() call.
+  // VAD smoothing, echo gate, and interpolation). Useful for bench-line
+  // logging and for AecChain to surface into ChainStats. Returns the
+  // configured low value before the first Process() call.
   float CurrentBlend() const;
 
   // Most recent RNNoise-reported voice activity probability (smoothed by
