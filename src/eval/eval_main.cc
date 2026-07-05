@@ -48,6 +48,7 @@
 #include "eval/metrics.h"
 #include "hal/file_io.h"
 #include "pipeline/aec_chain.h"
+#include "pipeline/dtln_res_adapter.h"
 
 namespace {
 
@@ -79,6 +80,11 @@ struct Args {
   // AEC3 double-talk transparency overrides (GB/T 45314 §5.7 sweeps).
   // All-sentinel = WebRTC defaults; see aec_tuning.h.
   ecnr::AecDtTuning aec3_tuning;
+  // Phase-3 RES hybrid (ADR-0014): empty = disabled.
+  std::string res_models_dir;
+  int res_units = 256;
+  // AGC2 adaptive-digital max gain cap; <0 = chain default (50).
+  float agc_max_gain_db = -1.0f;
 };
 
 void PrintUsage(const char* prog) {
@@ -154,6 +160,15 @@ bool ParseArgs(int argc, char** argv, Args* a) {
         return false;
       }
     }
+    else if (flag == "--res-models" && i + 1 < argc) a->res_models_dir = argv[++i];
+    else if (flag == "--res-units" && i + 1 < argc) a->res_units = std::atoi(argv[++i]);
+    else if (flag == "--agc-max-gain-db" && i + 1 < argc) {
+      a->agc_max_gain_db = static_cast<float>(std::atof(argv[++i]));
+      if (a->agc_max_gain_db < 0.0f || a->agc_max_gain_db > 100.0f) {
+        std::fprintf(stderr, "--agc-max-gain-db must be in [0, 100]\n");
+        return false;
+      }
+    }
     else if (flag == "-h" || flag == "--help") return false;
     else { std::fprintf(stderr, "unknown arg: %s\n", flag.c_str()); return false; }
   }
@@ -208,6 +223,9 @@ struct ChainConfig {
   float ns_vad_blend_low = 0.0f;
   float ns_vad_blend_high = 0.0f;
   ecnr::AecDtTuning aec3_tuning;
+  std::string res_models_dir;  // Phase-3 RES hybrid; empty = off
+  int res_units = 256;
+  float agc_max_gain_db = -1.0f;  // <0 = chain default
 };
 
 std::string ConfigName(const ChainConfig& config) {
@@ -225,6 +243,11 @@ std::string ConfigName(const ChainConfig& config) {
   }
   name += blend_buf;
   if (config.aec3_tuning.Any()) name += "+aec3dt";
+  if (!config.res_models_dir.empty()) {
+    char res_buf[32];
+    std::snprintf(res_buf, sizeof(res_buf), "+res%d", config.res_units);
+    name += res_buf;
+  }
   return name;
 }
 
@@ -237,6 +260,12 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
   ecnr::AecChain chain;
   // AEC3 config overrides bake into APM at Init — must precede it.
   if (config.aec3_tuning.Any()) chain.SetAecDtTuning(config.aec3_tuning);
+  if (!config.res_models_dir.empty()) {
+    chain.SetResConfig(config.res_models_dir, config.res_units);
+  }
+  if (config.agc_max_gain_db >= 0.0f) {
+    chain.SetAgcMaxGainDb(config.agc_max_gain_db);
+  }
   // Passthrough geometry — we don't care about beamforming for ERLE.
   // The mic path is mono-duplicated into ch[0..num_mics-1]; passthrough
   // selects ch[0].
@@ -321,6 +350,18 @@ ChainRunResult RunChain(const std::vector<int16_t>& ref,
     }
   }
   r.rtf = chain.Stats().Rtf();
+  if (!config.res_models_dir.empty()) {
+    // The RES hybrid branch delays the whole chain output by a fixed,
+    // known amount (output FIFO priming — DtlnResAdapter contract). Strip
+    // it so every per-frame metric compares input[t] against processing
+    // of input[t], same rationale as the near-end lag compensation:
+    // fixed latency is a §5.1 delay-budget item, not signal damage.
+    const size_t d =
+        static_cast<size_t>(ecnr::DtlnResAdapter::kLatencySamples16k);
+    if (r.residual.size() > d) {
+      r.residual.erase(r.residual.begin(), r.residual.begin() + d);
+    }
+  }
   return r;
 }
 
@@ -899,6 +940,9 @@ int main(int argc, char** argv) {
   config.ns_vad_blend_low = args.ns_vad_blend_low;
   config.ns_vad_blend_high = args.ns_vad_blend_high;
   config.aec3_tuning = args.aec3_tuning;
+  config.res_models_dir = args.res_models_dir;
+  config.res_units = args.res_units;
+  config.agc_max_gain_db = args.agc_max_gain_db;
   return RunSweep(args.conditions_dir, args.out_csv, args.out_wavs_dir,
                   args.stage_wavs_dir, config);
 }

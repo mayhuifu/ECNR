@@ -26,9 +26,10 @@ Beamformer (DSB/passthrough) → WebRTC AEC3 + HPF (APM #1) → RNNoise NS (int8
 1. **AEC-Challenge perceptual gate (enforced, also in CI):**
    `python3 reference/run_aec_challenge.py --bench ./build/ecnr_bench --dnsmos-model models/dnsmos_p835.onnx --aecmos-model models/aecmos.onnx --out-dir /tmp/gate`
    30-clip pinned corpus (`datasets/aec_challenge/MANIFEST.tsv`, fetched by `reference/fetch_aec_challenge.py`); floors per ADR-0012 §2.1 v2 + §3.1 applicability matrix. Exit 0 = PASS.
-2. **GB/T 45314 eCall pre-compliance gate (China market, ADR-0013):**
-   `python3 reference/gen_gbt45314_ecall_conditions.py && ./build/ecnr_eval --run --conditions conditions/gbt45314_ecall --out /tmp/gbt.csv && python3 reference/check_gbt45314_ecall_gate.py --in-csv /tmp/gbt.csv`
-   Current verdict: BLOCK on double-talk (Phase-3 RES gap) — see `docs/gbt45314-ecall-gate-current-verdict.md`. Don't "fix" the gate; fix the chain.
+2. **GB/T 45314 eCall pre-compliance gate (China market, ADR-0013/0014):**
+   `python3 reference/gen_gbt45314_ecall_conditions.py && ./build/ecnr_eval --run --conditions conditions/gbt45314_ecall --res-models models --res-units 256 --ns-vad-blend 0.20,1.0 --no-agc --out /tmp/gbt.csv && python3 reference/check_gbt45314_ecall_gate.py --in-csv /tmp/gbt.csv`
+   (RES models: `python3 reference/fetch_res_models.py`; needs the optional onnxruntime build — brew/`ORT_HOME`.)
+   Current verdict: **floors met** (exit 2 — headroom targets pending) at the eCall RC preset above, via the ADR-0014 DTLN/AEC3 hybrid; DT was the historic blocker. Don't "fix" the gate; fix the chain.
 3. Per-stage CPU split prints on the bench summary line (`cpu_aec/cpu_ns/cpu_agc`); perf changes get logged in `docs/perf/a55-optimization-log.md` with gate results.
 
 ## Conventions

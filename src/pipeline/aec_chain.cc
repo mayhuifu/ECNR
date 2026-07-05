@@ -5,12 +5,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "core/frame.h"
 #include "pipeline/aec3_adapter.h"
 #include "pipeline/agc2_adapter.h"
 #include "pipeline/beamformer.h"
 #include "pipeline/rnnoise_adapter.h"
+#if defined(ECNR_HAVE_ORT)
+#include "pipeline/dtln_res_adapter.h"
+#endif
 
 namespace ecnr {
 
@@ -48,6 +52,31 @@ constexpr int kGateBudgetFrames = 60;        // 600 ms of continuous open
 constexpr float kGateOpenThreshold = 0.5f;   // draining when above
 constexpr float kGateReplenishBelow = 0.3f;  // target below this replenishes
 constexpr int kGateReplenishPerFrame = 2;    // full refill in ~300 ms
+// RES hybrid selector (ADR-0014): echo likelihood from the DTLN branch
+// maps to the fusion weight α (1 = neural path / near end, 0 = AEC3 path
+// / echo). Thresholds biased toward the AEC3 path on ambiguity — §5.5.3
+// path-change stability is the sensitive clause; near-end frames measure
+// likelihood ≤ ~0.3 while echo residual tracks render at ≥ ~0.6
+// (docs/phase-3-res-hybrid-notes.md).
+#if defined(ECNR_HAVE_ORT)
+// Harder switching than the offline prototype: mid-fade frames mix the
+// AEC3 path's suppressed/distorted near end into the neural output and
+// dilute §5.7 correlation — measured 0.47 with a 0.25/0.55 window vs
+// 0.649 offline. Narrow window + fast attack + slow decay keeps the
+// neural path solid across near-end bursts and their inter-word pauses.
+constexpr float kResLikNearend = 0.40f;  // likelihood below → fully neural
+constexpr float kResLikEcho = 0.60f;     // likelihood above → fully AEC3
+constexpr float kResAlphaAttack = 0.6f;
+constexpr float kResAlphaDecay = 0.1f;
+// Echo veto on the second, independent feature: how much of the frame
+// survived AEC3. Echo-only frames measure post/pre ≈ 0.013 while frames
+// carrying near-end speech sit an order of magnitude higher — below the
+// veto the frame is echo beyond doubt and the AEC3 path is forced,
+// whatever the likelihood says. This decouples the likelihood rails
+// (tuned for §5.7 correlation) from the far-end TCL/convergence floors.
+constexpr float kResRatioVeto = 0.03f;
+#endif
+constexpr int kResDelaySamples = 384;    // DtlnResAdapter::kLatencySamples16k
 }  // namespace
 
 struct AecChain::Impl {
@@ -68,6 +97,18 @@ struct AecChain::Impl {
   int render_hangover_frames = 0;
   float echo_gate_smoothed = 1.0f;
   int gate_budget_frames = kGateBudgetFrames;
+  // Phase-3 RES hybrid branch (ADR-0014). Configured pre-Init via
+  // SetResConfig; empty dir = disabled.
+  std::string res_model_dir;
+  int res_units = 256;
+#if defined(ECNR_HAVE_ORT)
+  std::unique_ptr<DtlnResAdapter> res;
+#endif
+  bool res_active = false;
+  float res_alpha = 0.0f;                     // smoothed fusion weight
+  int res_veto_streak = 0;                    // consecutive sub-veto frames
+  std::array<int16_t, kResDelaySamples> a_delay{};  // A-path alignment ring
+  int a_delay_pos = 0;
 };
 
 AecChain::AecChain() : impl_(std::make_unique<Impl>()) {}
@@ -86,6 +127,22 @@ bool AecChain::Init(int sample_rate_hz, int num_mics,
   if (!impl_->aec3.Init(sample_rate_hz)) return false;
   if (!impl_->ns.Init(sample_rate_hz)) return false;
   if (!impl_->agc.Init(sample_rate_hz, impl_->agc_max_gain_db)) return false;
+  impl_->res_active = false;
+  if (!impl_->res_model_dir.empty()) {
+#if defined(ECNR_HAVE_ORT)
+    impl_->res = std::make_unique<DtlnResAdapter>();
+    if (!impl_->res->Init(sample_rate_hz, impl_->res_model_dir,
+                          impl_->res_units)) {
+      return false;  // caller explicitly asked for RES; fail loudly
+    }
+    impl_->res_active = true;
+#else
+    std::fprintf(stderr,
+                 "AecChain: RES requested but this binary was built without "
+                 "ONNX Runtime (ECNR_ENABLE_RES).\n");
+    return false;
+#endif
+  }
   impl_->sample_rate_hz = sample_rate_hz;
   impl_->num_mics = num_mics;
   Reset();
@@ -123,6 +180,10 @@ void AecChain::ProcessRender(const Frame& render) {
   if (sum_sq / render.n_samples > kRenderActiveMeanSquare) {
     impl_->render_hangover_frames = kRenderHangoverFrames;
   }
+
+#if defined(ECNR_HAVE_ORT)
+  if (impl_->res_active) impl_->res->PushRender(render);
+#endif
 }
 
 void AecChain::ProcessCapture(const Frame& mic_in, Frame& uplink_out) {
@@ -159,6 +220,79 @@ void AecChain::ProcessCaptureWithTaps(const Frame& mic_in, Frame& uplink_out,
 
   Frame post_aec;
   impl_->aec3.ProcessCapture(post_bf, post_aec);
+
+#if defined(ECNR_HAVE_ORT)
+  if (impl_->res_active) {
+    // Phase-3 hybrid fusion (ADR-0014): the neural branch runs on the RAW
+    // mic (it was trained mic+loopback end-to-end; feeding it AEC3
+    // residuals destroys the near end — measured, see
+    // docs/phase-3-res-hybrid-notes.md). The AEC3 path is delayed by the
+    // branch latency so the two are sample-aligned, then crossfaded by
+    // echo likelihood. Render idle → pure AEC3 path (no echo to fight;
+    // keeps B2 noise stability at the pre-RES behaviour).
+    Frame res_out;
+    impl_->res->ProcessCapture(post_bf, res_out);
+    const float lik = impl_->res->LastEchoLikelihood();
+    float alpha_target = 0.0f;
+    float ratio = -1.0f;
+    if (impl_->render_hangover_frames > 0) {
+      alpha_target = std::clamp(
+          (kResLikEcho - lik) / (kResLikEcho - kResLikNearend), 0.0f, 1.0f);
+      // Echo veto (see kResRatioVeto): computed on the UNFUSED AEC3
+      // output before it is overwritten below.
+      double pre_sq = 0.0, post_sq = 0.0;
+      for (int i = 0; i < post_bf.n_samples; ++i) {
+        pre_sq += static_cast<double>(post_bf.ch[0][i]) * post_bf.ch[0][i];
+        post_sq +=
+            static_cast<double>(post_aec.ch[0][i]) * post_aec.ch[0][i];
+      }
+      if (pre_sq > 0.0) {
+        ratio = static_cast<float>(std::sqrt(post_sq / pre_sq));
+        // Streak requirement: near-end frames dip under the veto for a
+        // frame or two between syllables (ratio p10 ≈ 0.013 measured on
+        // NE-active frames) while far-end sits below it continuously —
+        // engage only after 3 consecutive sub-veto frames.
+        if (ratio < kResRatioVeto) {
+          impl_->res_veto_streak =
+              std::min(impl_->res_veto_streak + 1, 1000);
+        } else {
+          impl_->res_veto_streak = 0;
+        }
+        if (impl_->res_veto_streak >= 3) alpha_target = 0.0f;
+      }
+    }
+    // Selector tracing for threshold calibration (dev-only; the getenv
+    // runs once). Format: lik ratio alpha_target alpha_smoothed.
+    static FILE* trace_fp = [] {
+      const char* p = std::getenv("ECNR_RES_TRACE");
+      return p ? std::fopen(p, "a") : nullptr;
+    }();
+    if (trace_fp) {
+      std::fprintf(trace_fp, "%.4f %.4f %.4f %.4f\n", lik, ratio,
+                   alpha_target, impl_->res_alpha);
+    }
+    // Veto closes at attack speed: the slow decay otherwise leaves the
+    // leaky neural path audible for ~100 ms after a frame is proven to
+    // be echo (single-frame ERLE point-samples in the convergence
+    // profile flagged exactly that).
+    const bool closing_on_veto = impl_->res_veto_streak >= 3;
+    const float ka = (alpha_target > impl_->res_alpha || closing_on_veto)
+                         ? kResAlphaAttack
+                         : kResAlphaDecay;
+    impl_->res_alpha += ka * (alpha_target - impl_->res_alpha);
+
+    // Delay the A path through the alignment ring, then fuse in place.
+    for (int i = 0; i < post_aec.n_samples; ++i) {
+      const int16_t delayed = impl_->a_delay[impl_->a_delay_pos];
+      impl_->a_delay[impl_->a_delay_pos] = post_aec.ch[0][i];
+      impl_->a_delay_pos = (impl_->a_delay_pos + 1) % kResDelaySamples;
+      const float fused = impl_->res_alpha * res_out.ch[0][i] +
+                          (1.0f - impl_->res_alpha) * delayed;
+      post_aec.ch[0][i] = static_cast<int16_t>(
+          fused < -32768.0f ? -32768 : fused > 32767.0f ? 32767 : fused);
+    }
+  }
+#endif
   const auto t_aec = std::chrono::steady_clock::now();
   if (taps.post_aec) *taps.post_aec = post_aec;
 
@@ -170,43 +304,62 @@ void AecChain::ProcessCaptureWithTaps(const Frame& mic_in, Frame& uplink_out,
   // idle no echo is possible; the gate stays open and RNNoise's own VAD
   // is the only authority. Uniform blends are unaffected (see
   // RnNsAdapter::SetEchoGate).
-  float gate_target = 1.0f;
-  if (impl_->render_hangover_frames > 0) {
-    --impl_->render_hangover_frames;
-    double pre_sq = 0.0, post_sq = 0.0;
-    for (int i = 0; i < post_bf.n_samples; ++i) {
-      pre_sq += static_cast<double>(post_bf.ch[0][i]) * post_bf.ch[0][i];
-      post_sq += static_cast<double>(post_aec.ch[0][i]) * post_aec.ch[0][i];
+  if (impl_->res_active) {
+    // RES hybrid mode: while echo is possible the fusion weight IS the
+    // near-end/echo verdict — reuse it for the NS blend gate. With render
+    // idle no echo exists and RNNoise's own VAD is the only authority
+    // (same contract as the non-RES controller below); pinning the gate
+    // to α (0 when idle) was measured to over-suppress pure near-end
+    // speech on the AEC-Challenge ST_NE clips.
+    if (impl_->render_hangover_frames > 0) {
+      --impl_->render_hangover_frames;
+      impl_->echo_gate_smoothed = impl_->res_alpha;
+    } else {
+      impl_->echo_gate_smoothed = 1.0f;
     }
-    if (pre_sq > 0.0) {
-      const float r = static_cast<float>(std::sqrt(post_sq / pre_sq));
-      gate_target = std::clamp(
-          (r - kGateRatioLo) / (kGateRatioHi - kGateRatioLo), 0.0f, 1.0f);
-    }
-    // pre_sq == 0: silent capture — nothing to protect or suppress; leave
-    // the gate at its open target.
-
-    // Leaky budget (constants above): sustained-open drains, quiet/echo-
-    // dominant frames replenish. Exhausted budget forces the gate shut so
-    // reconvergence leaks stay bounded to ~kGateBudgetFrames.
-    if (gate_target < kGateReplenishBelow) {
-      impl_->gate_budget_frames = std::min(
-          kGateBudgetFrames, impl_->gate_budget_frames + kGateReplenishPerFrame);
-    }
-    if (impl_->echo_gate_smoothed > kGateOpenThreshold) {
-      impl_->gate_budget_frames = std::max(0, impl_->gate_budget_frames - 1);
-    }
-    if (impl_->gate_budget_frames == 0) {
-      gate_target = 0.0f;
-    }
+    impl_->ns.SetEchoGate(impl_->echo_gate_smoothed);
   } else {
-    // Render idle: no echo possible, no reason to ration the gate.
-    impl_->gate_budget_frames = kGateBudgetFrames;
+    float gate_target = 1.0f;
+    if (impl_->render_hangover_frames > 0) {
+      --impl_->render_hangover_frames;
+      double pre_sq = 0.0, post_sq = 0.0;
+      for (int i = 0; i < post_bf.n_samples; ++i) {
+        pre_sq += static_cast<double>(post_bf.ch[0][i]) * post_bf.ch[0][i];
+        post_sq += static_cast<double>(post_aec.ch[0][i]) * post_aec.ch[0][i];
+      }
+      if (pre_sq > 0.0) {
+        const float r = static_cast<float>(std::sqrt(post_sq / pre_sq));
+        gate_target = std::clamp(
+            (r - kGateRatioLo) / (kGateRatioHi - kGateRatioLo), 0.0f, 1.0f);
+      }
+      // pre_sq == 0: silent capture — nothing to protect or suppress;
+      // leave the gate at its open target.
+
+      // Leaky budget (constants above): sustained-open drains, quiet/echo-
+      // dominant frames replenish. Exhausted budget forces the gate shut
+      // so reconvergence leaks stay bounded to ~kGateBudgetFrames.
+      if (gate_target < kGateReplenishBelow) {
+        impl_->gate_budget_frames =
+            std::min(kGateBudgetFrames,
+                     impl_->gate_budget_frames + kGateReplenishPerFrame);
+      }
+      if (impl_->echo_gate_smoothed > kGateOpenThreshold) {
+        impl_->gate_budget_frames =
+            std::max(0, impl_->gate_budget_frames - 1);
+      }
+      if (impl_->gate_budget_frames == 0) {
+        gate_target = 0.0f;
+      }
+    } else {
+      // Render idle: no echo possible, no reason to ration the gate.
+      impl_->gate_budget_frames = kGateBudgetFrames;
+    }
+    const float k = gate_target > impl_->echo_gate_smoothed ? kGateAttack
+                                                            : kGateDecay;
+    impl_->echo_gate_smoothed +=
+        k * (gate_target - impl_->echo_gate_smoothed);
+    impl_->ns.SetEchoGate(impl_->echo_gate_smoothed);
   }
-  const float k = gate_target > impl_->echo_gate_smoothed ? kGateAttack
-                                                          : kGateDecay;
-  impl_->echo_gate_smoothed += k * (gate_target - impl_->echo_gate_smoothed);
-  impl_->ns.SetEchoGate(impl_->echo_gate_smoothed);
 
   impl_->ns.Process(post_aec);
   const auto t_ns = std::chrono::steady_clock::now();
@@ -263,6 +416,13 @@ void AecChain::Reset() {
   impl_->stats = {};
   impl_->render_hangover_frames = 0;
   impl_->echo_gate_smoothed = 1.0f;
+  impl_->gate_budget_frames = kGateBudgetFrames;
+#if defined(ECNR_HAVE_ORT)
+  if (impl_->res_active) impl_->res->Reset();
+#endif
+  impl_->res_alpha = 0.0f;
+  impl_->a_delay.fill(0);
+  impl_->a_delay_pos = 0;
 }
 
 void AecChain::SetStreamDelayMs(int delay_ms) {
@@ -290,6 +450,12 @@ void AecChain::SetAecDtTuning(const AecDtTuning& tuning) {
   // Forwarded immediately; the adapter stores it until its Init() bakes
   // the config into the EchoControlFactory (same lifecycle as above).
   impl_->aec3.SetDtTuning(tuning);
+}
+
+void AecChain::SetResConfig(const std::string& model_dir, int units) {
+  // Stored for the next Init() (models load there). Empty dir disables.
+  impl_->res_model_dir = model_dir;
+  impl_->res_units = units;
 }
 
 void AecChain::SetAgcMaxGainDb(float max_gain_db) {

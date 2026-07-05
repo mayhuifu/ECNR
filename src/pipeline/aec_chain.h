@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include "core/frame.h"
 #include "pipeline/aec_tuning.h"
@@ -189,6 +190,17 @@ class AecChain {
   // negative fields keep WebRTC defaults. **Must be called BEFORE Init()**
   // (baked into APM construction, same contract as SetAecFilterLengthBlocks).
   void SetAecDtTuning(const AecDtTuning& tuning);
+
+  // Enable the Phase-3 DTLN RES hybrid branch (ADR-0014): a neural
+  // echo-control path over the raw mic, fused per-frame with the AEC3
+  // path by echo likelihood — near-end frames take the neural output
+  // (double-talk transparency), echo frames take AEC3 (+ full NS mopping).
+  // model_dir must contain dtln_aec_<units>_{1,2}.onnx (see
+  // reference/convert_dtln_res.py / fetch_res_models.py). 16 kHz tier
+  // only. **Must be called BEFORE Init()**; Init() fails if the models
+  // can't be loaded or the binary was built without ONNX Runtime.
+  // Empty dir (default) = branch disabled, zero overhead.
+  void SetResConfig(const std::string& model_dir, int units);
 
   // Override AGC2's adaptive-digital max_gain_db cap (WebRTC default = 50).
   // Lower values reduce noise-floor amplification between speech bursts;

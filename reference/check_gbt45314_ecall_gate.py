@@ -149,6 +149,13 @@ def main() -> int:
                 print(f"\n[PASS] {cid}")
 
     print(f"\nSummary: {rows} condition(s) graded.")
+    if rows == 0:
+        # An empty CSV means the eval run died before writing any
+        # condition (e.g. chain init failure) — that is a BLOCK, never a
+        # vacuous GREEN.
+        print("Overall: BLOCK - CSV contains no graded conditions "
+              "(eval run failed?).")
+        return 1
     if any_fail:
         print("Overall: BLOCK - do not release for GB/T 45314 eCall validation.")
         return 1

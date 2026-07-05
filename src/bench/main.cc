@@ -58,6 +58,9 @@ struct Args {
   // AEC3 double-talk transparency overrides (GB/T 45314 §5.7 sweeps;
   // see src/pipeline/aec_tuning.h). All-sentinel = WebRTC defaults.
   ecnr::AecDtTuning aec3_tuning;
+  // Phase-3 RES hybrid (ADR-0014); empty = disabled.
+  std::string res_models_dir;
+  int res_units = 256;
 };
 
 void PrintUsage(const char* prog) {
@@ -159,6 +162,10 @@ bool ParseArgs(int argc, char** argv, Args* a) {
                      a->aec_filter_blocks);
         return false;
       }
+    } else if (flag == "--res-models" && i + 1 < argc) {
+      a->res_models_dir = argv[++i];
+    } else if (flag == "--res-units" && i + 1 < argc) {
+      a->res_units = std::atoi(argv[++i]);
     } else if (flag == "--aec3-tune" && i + 1 < argc) {
       std::string err;
       if (!ecnr::ParseAecDtTuning(argv[++i], &a->aec3_tuning, &err)) {
@@ -253,6 +260,9 @@ int main(int argc, char** argv) {
   }
   if (args.aec3_tuning.Any()) {
     chain.SetAecDtTuning(args.aec3_tuning);
+  }
+  if (!args.res_models_dir.empty()) {
+    chain.SetResConfig(args.res_models_dir, args.res_units);
   }
   const bool chain_ok = args.bypass_beamformer
       ? chain.Init(sample_rate_hz, num_mics)
@@ -363,6 +373,9 @@ int main(int argc, char** argv) {
   }
   if (args.aec3_tuning.Any()) {
     std::printf("  aec3_dt_tuned=1");
+  }
+  if (!args.res_models_dir.empty()) {
+    std::printf("  res=%d", args.res_units);
   }
   if (args.aec_filter_blocks > 0) {
     std::printf("  aec_filter_blocks=%d", args.aec_filter_blocks);

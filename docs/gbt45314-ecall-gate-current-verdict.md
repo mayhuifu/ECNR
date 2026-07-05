@@ -1,6 +1,44 @@
 # GB/T 45314 eCall gate current verdict
 
-## Re-verdict 2026-07-04 — gate ported to main (v0.4.1+ chain, AGC-on default)
+## Re-verdict 2026-07-05 — **floors met** (RES hybrid, ADR-0014)
+
+**Chain under test:** `main` with the Phase-3 RES hybrid (parallel
+DTLN-AEC-256 / AEC3 fusion, ADR-0014) at the eCall RC preset:
+`--res-models models --res-units 256 --ns-vad-blend 0.20,1.0 --no-agc`.
+
+**Overall: WARN (exit 2) — all pre-compliance floors met; headroom
+targets pending.** The double-talk blocker that three corpora pointed at
+since 2026-05-27 is cleared; release to GB/T 45314 vehicle/lab validation
+is no longer blocked by this gate.
+
+| Condition | Result |
+|---|---|
+| DT driver −6 dB (§5.7) | **floors PASS** — near-end delta −10.5 dB (floor −12), corr 0.656 (floor 0.60), lag 24 ms; soft target −6 dB pending |
+| Far-end quiet TCL/convergence (§5.5.1, §4.8.4) | PASS — TCL proxy 50.3 dB, convergence profile green (headroom target 55 dB pending) |
+| Far-end B1 road (§5.8.1) | PASS (same headroom note) |
+| Time-varying path (§5.5.3) | PASS — variation < 6 dB with the WebRTC-default A-path suppressor |
+| B2 noise-only stability (§5.8.1) | PASS |
+
+Cross-checks on the same binary + preset: AEC-Challenge perceptual gate
+**PASS** with DT *improved* over the AGC-on default (aecmos_dt p50
+3.28 → 3.90); 43/43 unit tests; verdict bit-identical across reruns.
+
+Why this worked where suppressor tuning could not: the measured AEC3
+transparency ceiling was corr 0.579 (< 0.60 floor) — spectral masking
+cannot separate a near end 6 dB under echo. The hybrid gives the DT
+frames to a neural branch trained for exactly that separation, and every
+echo-owned clause stays on the untouched AEC3 path. Full topology
+matrix + selector calibration data: `docs/phase-3-res-hybrid-notes.md`;
+decision record: ADR-0014.
+
+Open before vehicle validation: A55 CPU budget for the neural branch
+(host RTF 0.071 — int8 quantization / render-gated inference queued),
+headroom targets (55 dB steady ERLE, −6 dB DT soft target), and the
+ADR-0013 lab-only items (unchanged).
+
+---
+
+## Historical: re-verdict 2026-07-04 — gate ported to main (v0.4.1+ chain, AGC-on default)
 
 **Chain under test:** `main` post-v0.4.1 (AGC2 on by default per ADR-0012 A6, int8 RNNoise, rnnoise_default NS). `ecnr_eval` now also defaults AGC **on** so the gate grades the production configuration by default (`--no-agc` opts out).
 

@@ -100,6 +100,32 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# --- ONNX Runtime (Phase-3 RES hybrid stage, ADR-0014) -------------------------
+# Optional: when onnxruntime is available the DTLN RES branch compiles into
+# ecnr_pipeline (enabled at runtime only via AecChain::SetResConfig — zero
+# overhead otherwise). ORT is packaged everywhere we build (brew bottle on
+# macOS, upstream release tarballs for linux x64/aarch64 — point ORT_HOME
+# at an unpacked tarball on CI / Yocto).
+option(ECNR_ENABLE_RES "Build the DTLN RES hybrid stage (needs onnxruntime)" ON)
+set(ECNR_HAVE_ORT FALSE)
+if(ECNR_ENABLE_RES)
+  find_path(ORT_INCLUDE_DIR onnxruntime_cxx_api.h
+    HINTS "$ENV{ORT_HOME}/include"
+          /opt/homebrew/opt/onnxruntime/include/onnxruntime
+          /usr/local/opt/onnxruntime/include/onnxruntime
+          /usr/include/onnxruntime)
+  find_library(ORT_LIBRARY onnxruntime
+    HINTS "$ENV{ORT_HOME}/lib"
+          /opt/homebrew/opt/onnxruntime/lib
+          /usr/local/opt/onnxruntime/lib)
+  if(ORT_INCLUDE_DIR AND ORT_LIBRARY)
+    set(ECNR_HAVE_ORT TRUE)
+    message(STATUS "ecnr: RES stage ON (onnxruntime: ${ORT_LIBRARY})")
+  else()
+    message(STATUS "ecnr: RES stage OFF (onnxruntime not found; set ORT_HOME)")
+  endif()
+endif()
+
 # --- ecnr_core (frame, ring buffer) --------------------------------------------
 add_library(ecnr_core STATIC
   src/core/ring_buffer.cc
@@ -119,6 +145,12 @@ target_link_libraries(ecnr_pipeline PUBLIC ecnr_core)
 # *_adapter.cc files reference those types. Keep PRIVATE so the public
 # AecChain header stays clean.
 target_link_libraries(ecnr_pipeline PRIVATE webrtc::apm ecnr_rnnoise PkgConfig::SPEEXDSP)
+if(ECNR_HAVE_ORT)
+  target_sources(ecnr_pipeline PRIVATE src/pipeline/dtln_res_adapter.cc)
+  target_compile_definitions(ecnr_pipeline PRIVATE ECNR_HAVE_ORT=1)
+  target_include_directories(ecnr_pipeline PRIVATE ${ORT_INCLUDE_DIR})
+  target_link_libraries(ecnr_pipeline PRIVATE ${ORT_LIBRARY})
+endif()
 # aec3_adapter.cc builds a tuned EchoControlFactory around EchoCanceller3,
 # whose header is not part of the installed API — include it from the
 # vendored source tree (same pinned revision the archive was built from,
